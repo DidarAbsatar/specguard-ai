@@ -12,7 +12,7 @@ import sys
 import tempfile
 from urllib.request import Request, urlopen
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 def extract(path):
@@ -21,9 +21,14 @@ def extract(path):
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         from pypdf import PdfReader
-        pages = [p.extract_text() for p in PdfReader(path).pages]
-        if not pages or any(not p.strip() for p in pages):
-            raise ValueError("Пустая страница или PDF без текстового слоя")
+        pages = []
+        for number, page in enumerate(PdfReader(path).pages, 1):
+            text = page.extract_text()
+            if not text.strip():
+                stream = page.get_contents()
+                if stream is not None and stream.get_data().strip():
+                    raise ValueError(f"Страница {number} содержит графику или команды PDF без извлекаемого текста")
+            pages.append(text)
     elif suffix in {".md", ".txt"}:
         pages = [path.read_text(encoding="utf-8-sig")]
     else:
@@ -94,7 +99,10 @@ def main(argv=None):
     providers = cmd.add_mutually_exclusive_group()
     providers.add_argument("--allow-cloud", action="store_true", help="Передать текст в Gemini")
     providers.add_argument("--ollama", metavar="MODEL", help="Модель на localhost:11434")
+    cmd.add_argument("--verify-with-ollama", metavar="MODEL", help="Локально проверить замечания Gemini по цитатам")
     args = parser.parse_args(argv)
+    if args.command == "validate" and args.verify_with_ollama and not args.allow_cloud:
+        cmd.error("--verify-with-ollama требует --allow-cloud")
     started = time.monotonic()
     try:
         if args.input.resolve() == args.output.resolve():
@@ -113,6 +121,10 @@ def main(argv=None):
             try:
                 from local_review import review, verify
                 rows = verify(review(blocks, args.ollama), blocks, args.ollama) if args.ollama else semantic(blocks)
+                if args.verify_with_ollama:
+                    candidates = [r for r in rows if r["kind"] != "requirement"]
+                    rows = [r for r in rows if r["kind"] == "requirement"]
+                    rows.extend(verify(candidates, blocks, args.verify_with_ollama))
                 status = "выполнен"
             except Exception as exc:
                 logging.warning("Семантический этап завершился ошибкой %s", type(exc).__name__)
@@ -124,9 +136,10 @@ def main(argv=None):
         run["verification"] = [r for r in rows if "verification" in r]
         run["sources"] = blocks
         run["manifest"] = {"Документ": args.input.name, "Дата": dt.datetime.now().astimezone().isoformat(),
-            "Модель": model, "Семантическая проверка": status, "Версия": VERSION,
+            "Модель": model, "Модель сверки цитат": args.verify_with_ollama or args.ollama or "отключена",
+            "Семантическая проверка": status, "Версия": VERSION,
             "SHA-256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
-            "Сборка": hashlib.sha256(b"".join(Path(__file__).with_name(n).read_bytes() for n in
+            "Сборка": hashlib.sha256(b"".join(Path(__file__).with_name(n).read_text(encoding="utf8").encode("utf8") for n in
                 ("specguard.py","local_review.py","quality.py","reporting.py"))).hexdigest()[:16],
             "Длительность, с": round(time.monotonic()-started, 2)}
         report = format_report(run, args.output.suffix.lower())

@@ -5,42 +5,73 @@ from itertools import combinations
 IDENT = re.compile(r"^(?:[-*\s]|\*\*)*([A-ZА-ЯЁ]{1,12}-\d+)\b[.:]?\**\s*", re.I)
 BOUND = re.compile(r"^(.+?)\s+(?:долж(?:ен|на|но|ны)\s+(?:быть|составлять)\s+)?(не менее|не более|минимум|максимум)\s+(\d+)\s+([а-яёa-z%₸]+)[.!]?$", re.I)
 NORM = re.compile(r"долж|обязан|запрещ|необходим|разреш|требуется|shall|must", re.I)
+TIME_SCALE = {word: seconds for seconds, forms in (
+    (1, "с секунд секунда секунды секунду"),
+    (60, "мин минут минута минуты минуту"),
+    (3600, "ч часов час часа"),
+    (86400, "суток сутки дня дней день"),
+) for word in forms.split()}
+HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
+CONTRACT_FIELD = re.compile(r"^\|\s*[*`]*(?:authorization|авторизация|http method|rest type|content-type|request url)[*`]*\s*\|", re.I)
 
 
-def inventory(blocks):
-    section, table, reqs, in_code = "", False, [], False
+def section_paths(blocks):
+    """Keep the entire heading ancestry; code examples have no normative scope."""
+    path, result, fence = [], {}, None
     for ref, text in blocks.items():
-        if text.startswith("```"):
-            in_code = not in_code
+        marker = re.match(r"^(`{3,}|~{3,})", text)
+        if marker and fence is None:
+            fence = marker[1]
             continue
-        if in_code:
+        if fence:
+            if text.startswith(fence) and not text.strip(fence[0]).strip():
+                fence = None
             continue
-        if text.startswith("#"):
-            section, table = text.lstrip("# ").strip(), False
+        heading = HEADING.match(text)
+        if heading:
+            level = len(heading[1])
+            path = [entry for entry in path if entry[0] < level]
+            path.append((level, heading[2], ref))
             continue
+        result[ref] = tuple(path)
+    return result
+
+
+def inventory(blocks, paths=None):
+    paths = section_paths(blocks) if paths is None else paths
+    table, reqs = False, []
+    for ref, text in blocks.items():
+        if ref not in paths:
+            table = False
+            continue
+        section = paths[ref][-1][1] if paths[ref] else ""
         ident = IDENT.match(text)
         if text.startswith("|"):
             if not table:
                 table = True
-                continue
+                if not CONTRACT_FIELD.match(text):
+                    continue
         else:
             table = False
         if re.search("ревью требований|согласующих|общие сведения", section, re.I):
             continue
         normative = re.search("требования|правила|логика работы|параметры запроса|query-параметры|ответ|статусы|приемки", section, re.I)
-        if not (ident or normative or NORM.search(text) or BOUND.match(text)):
+        if not (ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or BOUND.match(text)):
             continue
         if text.startswith(("```", "{")) or text.lower() in ("или", "да / нет"):
             continue
-        clean = text[ident.end():] if ident else text
+        clean = text[ident.end():] if ident else re.sub(r"^\d+[.)]\s+", "", text)
         for sentence in re.split(r"(?<=[.!?])\s+(?=[А-ЯЁA-Z])", clean):
+            if not sentence.strip() or re.fullmatch(r"\d+[.)]", sentence):
+                continue
             reqs.append(dict(source_id=ident[1] if ident else "—", refs=[ref], summary=sentence,
                              section=section, action="Смысл и полнота требуют ревью."))
     return reqs
 
 
 def analyze(blocks, rows, complete):
-    reqs = inventory(blocks)
+    paths = section_paths(blocks)
+    reqs = inventory(blocks, paths)
     semantic = [r for r in rows if r["kind"] == "requirement"]
     covered = {k for r in semantic for k in r["refs"]}
     reqs = [r for r in reqs if r["refs"][0] not in covered]
@@ -63,19 +94,17 @@ def analyze(blocks, rows, complete):
         if re.search(r"\b(TBD|TBS|TBR)\b", text):
             add("placeholder", "MEDIUM", [ref], "Присутствует маркер открытого решения.",
                 "Ожидаемый результат требует уточнения.", "Заполнить значение или объяснить маркер.")
-        match = BOUND.fullmatch(text)
+        match = BOUND.fullmatch(text) if ref in paths else None
         if match:
             subject, op, value, unit = match.groups()
-            bounds.setdefault((subject.casefold(), unit.casefold()), []).append(
-                (op.lower() in {"не менее", "минимум"}, int(value), ref))
-    for (subject, unit), entries in bounds.items():
+            unit = unit.casefold()
+            scale = TIME_SCALE.get(unit)
+            bounds.setdefault((paths[ref], subject.casefold(), "секунд" if scale else unit), []).append(
+                (op.lower() in {"не менее", "минимум"}, int(value) * (scale or 1), ref))
+    for (_, subject, unit), entries in bounds.items():
         for a, b in combinations(entries, 2):
             lower, upper = sorted((a,b), reverse=True)
             if lower[0] and not upper[0] and lower[1] > upper[1]:
-                # Section scope can carry conditions absent from the sentence.
-                scopes = {r["refs"][0]: r["section"] for r in inventory(blocks)}
-                if scopes.get(lower[2]) != scopes.get(upper[2]):
-                    continue
                 add("bounds", "BLOCKER", [lower[2], upper[2]], "В одном разделе заданы несовместимые границы.",
                     "Нельзя выбрать значение, удовлетворяющее обоим условиям.", "Согласовать область действия и диапазон.",
                     f"{subject} = {upper[1]} {unit} нарушает минимум {lower[1]}. Любое большее значение нарушает максимум.", True)
@@ -95,7 +124,7 @@ def analyze(blocks, rows, complete):
         if r["kind"] != "requirement":
             add("semantic", "HIGH" if r["kind"] == "issue" else "MEDIUM", r["refs"], r["summary"],
                 r["impact"], r["action"], r["scenario"])
-    months = ("январ","феврал","март","апрел","ма","июн","июл","август","сентябр","октябр","ноябр","декабр")
+    months = ("январ","феврал","март","апрел","ма[йяе]","июн","июл","август","сентябр","октябр","ноябр","декабр")
     calendar = []
     for ref, raw in blocks.items():
         rule = re.search(r"месяц (?:определяется|рассчитывается) по дате (?:совершения )?([а-яё]{4,})", raw, re.I)
@@ -113,8 +142,8 @@ def analyze(blocks, rows, complete):
             if not purchase or not posted:
                 continue
             for month in months:
-                if (posted[1].startswith(month) and not purchase[1].startswith(month)
-                        and cells[2].startswith(month) and re.search("вырос|увелич", cells[2])):
+                if (re.match(month, posted[1]) and not re.match(month, purchase[1])
+                        and re.match(month, cells[2]) and re.search("вырос|увелич", cells[2])):
                     add("calendar", "HIGH", [calendar[0][0], k],
                         "Пример относит изменение счётчика к месяцу второго события. Правило указывает на первое.",
                         "QA и разработчик получат разные ожидаемые суммы за один период.",
@@ -155,7 +184,11 @@ def analyze(blocks, rows, complete):
             else:
                 r["action"] = "Автопроверки явных нарушений не выявили. Полнота и бизнес-корректность требуют подтверждения."
     blockers = [f for f in findings if f["severity"] == "BLOCKER"]
-    gate = "BLOCKED" if blockers else "REVIEW" if findings or not complete or not reqs else "READY"
+    mapped = {ref for r in reqs for ref in r["refs"]}
+    # Unclassified prose may contain an implicit obligation. Leave it visible to reviewers.
+    unclassified = [ref for ref in paths if ref not in mapped]
+    gate = "BLOCKED" if blockers else "REVIEW" if findings or not complete or not reqs or unclassified else "READY"
     links = [{"from":r["id"], "to":k, "relation":"source"} for r in reqs for k in r["refs"]]
     links.extend({"from":r["id"], "to":f, "relation":"finding"} for r in reqs for f in r["findings"])
-    return dict(requirements=reqs, findings=findings, gate=gate, links=links)
+    return dict(requirements=reqs, findings=findings, gate=gate, links=links,
+                unclassified_refs=unclassified)

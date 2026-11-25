@@ -37,6 +37,11 @@ def format_report(run, suffix):
     for r in reqs:
         quotes = " / ".join(k+" "+display(run["sources"][k]) for k in r["refs"])
         lines.append(f"| {r['id']} | {display(r['source_id'])} | {quotes} | {display(r['summary'])} | {display(r['action'])} | {', '.join(r['findings']) or '—'} |")
+    pending = run.get("unclassified_refs", [])
+    if pending:
+        lines += ["", "## Строки вне карты требований", "",
+                  f"Проверьте {len(pending)} строк: среди них могут быть контекст, заголовки таблиц и пропущенные обязательства.", ""]
+        lines.extend(f"- {ref} · {display(run['sources'][ref])}" for ref in pending)
     md = "\n".join(lines)
     if suffix == ".md":
         return md

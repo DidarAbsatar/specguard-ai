@@ -12,7 +12,7 @@ from specguard import main
 class QualityTests(unittest.TestCase):
     def test_corpus(self):
         metrics = run()
-        self.assertEqual((metrics["true_positive"], metrics["false_positive"], metrics["false_negative"]), (4,0,0))
+        self.assertEqual((metrics["true_positive"], metrics["false_positive"], metrics["false_negative"]), (5,0,0))
 
     def test_gate_and_evidence(self):
         blocks = {"P1L1":"R-1. Размер не менее 12 байт.", "P1L2":"R-2. Размер не более 6 байт."}
