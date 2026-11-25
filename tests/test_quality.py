@@ -22,7 +22,10 @@ class QualityTests(unittest.TestCase):
         for ref in result["findings"][0]["source_refs"]:
             self.assertEqual(ref["quote"], blocks[ref["anchor"]])
         self.assertIn("6 байт", result["findings"][0]["counterexample"])
-        self.assertEqual(analyze({"a":"Сервис должен вернуть квитанцию."}, [], True)["gate"], "READY")
+        src = {"a": "Сервис должен вернуть квитанцию."}
+        self.assertEqual(analyze(src, [], True)["gate"], "REVIEW")
+        row = dict(kind="requirement", refs=["a"], summary=src["a"], action="Наблюдаемый результат указан.")
+        self.assertEqual(analyze(src, [row], True)["gate"], "READY")
 
     def test_partial_report(self):
         with tempfile.TemporaryDirectory() as tmp:

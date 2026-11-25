@@ -12,7 +12,10 @@ from specguard import extract, main
 
 
 def analyze_lines(*lines):
-    return analyze({f"P1L{i}": s for i, s in enumerate(lines, 1)}, [], True)
+    blocks = {f"P1L{i}": s for i, s in enumerate(lines, 1)}
+    reviewed = [dict(kind="requirement", refs=[k], summary=s, action="Проверено по тексту.")
+                for k, s in blocks.items() if not s.startswith("#")]
+    return analyze(blocks, reviewed, True)
 
 
 class CoverageTests(unittest.TestCase):

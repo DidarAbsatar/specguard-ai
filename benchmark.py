@@ -1,5 +1,6 @@
 """Reproducible small regression corpus. Units are (category, source lines)."""
 import argparse
+from collections import Counter
 import json
 import time
 from pathlib import Path
@@ -17,12 +18,28 @@ CASES = [
     (["Клиент должен получить квитанцию."], []),
 ]
 
+TRANSFER_CASES = [
+    (["R-1. Буфер минимум 32 байта.", "R-2. Буфер максимум 7 байтов."], [("bounds", (1, 2))]),
+    (["# Требования", "Сервис должен выдать талон.", "```text", "Лимит TBD", "```"], []),
+    (["Задержка минимум 2 минуты.", "Задержка максимум 120 секунд."], []),
+    (["# Архив", "Объём минимум 27 байтов.", "# Экспорт", "Объём максимум 3 байта."], []),
+    (["Месяц определяется по дате доставки.",
+      "| Доставка 30 ноября | Учесть 1 декабря | Декабрьский счётчик увеличен |"], [("calendar", (1, 2))]),
+    (["Месяц определяется по дате доставки.",
+      "| Доставка 30 ноября | Учесть 1 декабря | Ноябрьский счётчик увеличен |"], []),
+    (["Сервис выдаёт максимум один талон за неделю.",
+      "Повторная регистрация вызывает талон независимо от истории пациента."], [("state", (1, 2))]),
+    (["| HTTP method | GET |", "1. Прочитать квитанцию."], []),
+]
 
-def run(cloud=False, hybrid=False):
+
+def run(cloud=False, hybrid=False, suite="core"):
+    cases = {"core": CASES, "transfer": TRANSFER_CASES, "all": CASES + TRANSFER_CASES}[suite]
     tp = fp = fn = 0
     failures = 0
     started = time.monotonic()
-    for lines, expected in CASES:
+    details = []
+    for index, (lines, expected) in enumerate(cases, 1):
         src = {f"P1L{i}": v for i,v in enumerate(lines,1)}
         if cloud:
             from specguard import semantic, verify_candidates
@@ -30,25 +47,30 @@ def run(cloud=False, hybrid=False):
                 rows = semantic(src)
                 if hybrid:
                     rows = [r for r in verify_candidates(rows, src) if r["kind"] != "rejected"]
-            except (ValueError, OSError, KeyError):
+            except (ValueError, OSError, KeyError, TypeError, IndexError) as exc:
                 failures += 1
-                rows = []
-            actual = {tuple(sorted(int(k[3:]) for k in r["refs"])) for r in rows if r["kind"] != "requirement"}
-            if hybrid:
-                actual = {tuple(sorted(int(s["anchor"][3:]) for s in f["source_refs"]))
-                          for f in analyze(src, rows, True)["findings"]}
-            gold = {anchors for category, anchors in expected}
+                details.append(dict(document=index, error=type(exc).__name__))
+                continue
+            if not hybrid:
+                actual = [(r["category"], tuple(sorted({int(k[3:]) for k in r["refs"]})))
+                          for r in rows if r["kind"] != "requirement"]
         else:
-            findings = analyze(src, [], False)["findings"]
-            actual = {(f["category"], tuple(sorted(int(s["anchor"][3:]) for s in f["source_refs"]))) for f in findings}
-            gold = set(expected)
-        tp += len(actual & gold)
-        fp += len(actual - gold)
-        fn += len(gold - actual)
-    return dict(documents=len(CASES), failures=failures, elapsed_s=round(time.monotonic()-started,2),
-                matching="anchors only" if cloud else "category and anchors",
+            rows = []
+        if not cloud or hybrid:
+            findings = analyze(src, rows, cloud)["findings"]
+            actual = [(f["category"], tuple(sorted(int(k[3:]) for k in f["core_refs"]))) for f in findings]
+        gold, predicted = Counter(expected), Counter(actual)
+        hits, extra, missed = (gold & predicted).total(), (predicted - gold).total(), (gold - predicted).total()
+        tp += hits
+        fp += extra
+        fn += missed
+        details.append(dict(document=index, expected=expected, predicted=actual, tp=hits, fp=extra, fn=missed))
+    return dict(documents=len(cases), completed=len(cases)-failures, suite=suite, failures=failures,
+                status="INCOMPLETE" if failures else "COMPLETE", cases=details,
+                elapsed_s=round(time.monotonic()-started,2), matching="category and core anchors, counting duplicates",
                 true_positive=tp, false_positive=fp, false_negative=fn,
-                precision=tp/(tp+fp) if tp+fp else None, recall=tp/(tp+fn) if tp+fn else None)
+                precision=tp/(tp+fp) if tp+fp and not failures else None,
+                recall=tp/(tp+fn) if tp+fn and not failures else None)
 
 
 if __name__ == "__main__":
@@ -56,10 +78,11 @@ if __name__ == "__main__":
     parser.add_argument("--allow-cloud", action="store_true", help="Отправить тестовые документы в Gemini")
     parser.add_argument("--hybrid", action="store_true", help="Добавить правила и сверку замечаний в Gemini")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--suite", choices=("core", "transfer", "all"), default="all")
     args = parser.parse_args()
     if args.hybrid and not args.allow_cloud:
         parser.error("--hybrid требует --allow-cloud")
-    metrics = run(args.allow_cloud, args.hybrid)
+    metrics = run(args.allow_cloud, args.hybrid, args.suite)
     result = json.dumps(metrics, indent=2)
     if args.output:
         args.output.parent.mkdir(exist_ok=True, parents=True)

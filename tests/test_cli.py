@@ -35,8 +35,12 @@ class ReviewTest(unittest.TestCase):
     @patch.dict("os.environ", {"GEMINI_MODEL": "test", "GEMINI_API_KEY": "test"})
     @patch("specguard.urlopen")
     def test_unknown_reference(self, remote):
-        row = dict(kind="issue", refs=["invented"], summary="x", action="", impact="", scenario="")
-        result = dict(candidates=[dict(finishReason="STOP", content=dict(parts=[dict(text=json.dumps([row]))]))])
+        row = dict(kind="issue", refs=["invented"], summary="x", action="check", impact="risk", scenario="",
+                   criterion="correct", category="semantic", severity="MEDIUM", assessment="review")
+        del row["assessment"]
+        payload = dict(requirements=[], findings=[row])
+        result = dict(candidates=[dict(finishReason="STOP", content=dict(parts=[dict(text=json.dumps(payload))]))])
         remote.return_value.__enter__.return_value.read.return_value = json.dumps(result)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(specguard.PartialReview) as caught:
             specguard.semantic({"P1L1": "x"})
+        self.assertIn("ссылка", caught.exception.rejected[0])

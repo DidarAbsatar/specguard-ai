@@ -1,5 +1,6 @@
 """Evidence-linked review of normative statements and their acceptance examples."""
 import re
+from collections import defaultdict
 from itertools import combinations
 
 IDENT = re.compile(r"^(?:[-*\s]|\*\*)*([A-ZА-ЯЁ]{1,12}-\d+)\b[.:]?\**\s*", re.I)
@@ -13,6 +14,8 @@ TIME_SCALE = {word: seconds for seconds, forms in (
 ) for word in forms.split()}
 HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
 CONTRACT_FIELD = re.compile(r"^\|\s*[*`]*(?:authorization|авторизация|http method|rest type|content-type|request url)[*`]*\s*\|", re.I)
+VAGUE = re.compile(r"\b(?:быстро|удобно|своевременно|оперативно)\b", re.I)
+PENDING = "Смысл и полнота требуют ревью."
 
 
 def section_paths(blocks):
@@ -37,7 +40,7 @@ def section_paths(blocks):
     return result
 
 
-def inventory(blocks, paths=None):
+def inventory(blocks, paths=None, model_refs=()):
     paths = section_paths(blocks) if paths is None else paths
     table, reqs = False, []
     for ref, text in blocks.items():
@@ -56,28 +59,56 @@ def inventory(blocks, paths=None):
         if re.search("ревью требований|согласующих|общие сведения", section, re.I):
             continue
         normative = re.search("требования|правила|логика работы|параметры запроса|query-параметры|ответ|статусы|приемки", section, re.I)
-        if not (ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or BOUND.match(text)):
+        if not (ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text)
+                or BOUND.match(text) or ref in model_refs):
             continue
         if text.startswith(("```", "{")) or text.lower() in ("или", "да / нет"):
             continue
         clean = text[ident.end():] if ident else re.sub(r"^\d+[.)]\s+", "", text)
-        for sentence in re.split(r"(?<=[.!?])\s+(?=[А-ЯЁA-Z])", clean):
+        sentences = [clean] if text.startswith("|") else re.split(r"(?<=[.!?;])\s+(?=[А-ЯЁA-Zа-яёa-z])", clean)
+        for sentence in sentences:
             if not sentence.strip() or re.fullmatch(r"\d+[.)]", sentence):
                 continue
             reqs.append(dict(source_id=ident[1] if ident else "—", refs=[ref], summary=sentence,
-                             section=section, action="Смысл и полнота требуют ревью."))
+                             section=section, action=PENDING))
+    return reqs
+
+
+def reconcile(blocks, paths, rows):
+    """Keep each source clause until model excerpts account for its text."""
+    by_ref = defaultdict(list)
+    for row in rows:
+        if row["kind"] == "requirement" and len(row["refs"]) == 1:
+            by_ref[row["refs"][0]].append(row)
+    reqs = inventory(blocks, paths, by_ref)
+    for req in reqs:
+        ref, = req["refs"]
+        clause = req["summary"]
+        covered = set()
+        actions = []
+        assessments = []
+        for row in by_ref[ref]:
+            excerpt = row["summary"].strip().strip(" .;")
+            if not excerpt or clause.count(excerpt) != 1:
+                continue
+            start = clause.index(excerpt)
+            covered.update(range(start, start + len(excerpt)))
+            if row["action"].strip():
+                actions.append(row["action"].strip())
+            if row.get("assessment"):
+                assessments.append({k: row[k] for k in ("summary", "criterion", "assessment", "action")})
+        # Punctuation and Markdown syntax do not constitute a separate obligation.
+        req["coverage"] = "reviewed" if covered and all(
+            i in covered for i, ch in enumerate(clause) if ch.isalnum()) else "pending"
+        if req["coverage"] == "reviewed" and actions:
+            req["action"] = " ".join(dict.fromkeys(actions))
+        req["model_assessments"] = assessments
     return reqs
 
 
 def analyze(blocks, rows, complete):
     paths = section_paths(blocks)
-    reqs = inventory(blocks, paths)
-    semantic = [r for r in rows if r["kind"] == "requirement"]
-    covered = {k for r in semantic for k in r["refs"]}
-    reqs = [r for r in reqs if r["refs"][0] not in covered]
-    for r in semantic:
-        ident = IDENT.match(blocks[r["refs"][0]])
-        reqs.append(dict(r, source_id=ident[1] if ident else "—", section=""))
+    reqs = reconcile(blocks, paths, rows)
     findings = []
 
     def add(category, severity, refs, reason, impact, fix, scenario=None, confirmed=False):
@@ -86,10 +117,12 @@ def analyze(blocks, rows, complete):
             source_refs=evidence, observed_text=" / ".join(v["quote"] for v in evidence),
             reason=reason, impact=impact, recommended_fix=fix, counterexample=scenario,
             confidence="высокая" if confirmed else "требует проверки", needs_human_decision=True,
-            status="CONFIRMED" if confirmed else "REVIEW"))
+            status="CONFIRMED" if confirmed else "REVIEW", detectors=["rule"], core_refs=list(dict.fromkeys(refs))))
+        return findings[-1]
 
     bounds = {}
-    for ref, raw in blocks.items():
+    for ref in paths:
+        raw = blocks[ref]
         text = IDENT.sub("", raw).strip()
         if re.search(r"\b(TBD|TBS|TBR)\b", text):
             add("placeholder", "MEDIUM", [ref], "Присутствует маркер открытого решения.",
@@ -99,6 +132,8 @@ def analyze(blocks, rows, complete):
             subject, op, value, unit = match.groups()
             unit = unit.casefold()
             scale = TIME_SCALE.get(unit)
+            if re.fullmatch(r"байт(?:а|ов|ы)?", unit):
+                unit = "байт"
             bounds.setdefault((paths[ref], subject.casefold(), "секунд" if scale else unit), []).append(
                 (op.lower() in {"не менее", "минимум"}, int(value) * (scale or 1), ref))
     for (_, subject, unit), entries in bounds.items():
@@ -113,6 +148,8 @@ def analyze(blocks, rows, complete):
     for ref, raw in blocks.items():
         if raw.startswith("# ") or raw.startswith("## "):
             method = None
+        if ref not in paths:
+            continue
         cells = [c.strip(" *`").casefold() for c in raw.strip("|").split("|")]
         if len(cells) == 2 and cells[0] in {"метод", "rest type", "http method", "метод http"}:
             method = ref if cells[1] == "get" else None
@@ -120,20 +157,18 @@ def analyze(blocks, rows, complete):
             add("http", "HIGH", [method, ref], "Контракт GET содержит операцию изменения состояния.",
                 "Клиент может повторить запрос как безопасное чтение.", "Согласовать метод и эффект повторного запроса.",
                 "Клиент повторяет тот же GET. Должно ли измениться сохранённое состояние?")
-    for r in rows:
-        if r["kind"] != "requirement":
-            add("semantic", "HIGH" if r["kind"] == "issue" else "MEDIUM", r["refs"], r["summary"],
-                r["impact"], r["action"], r["scenario"])
     months = ("январ","феврал","март","апрел","ма[йяе]","июн","июл","август","сентябр","октябр","ноябр","декабр")
     calendar = []
-    for ref, raw in blocks.items():
+    for ref in paths:
+        raw = blocks[ref]
         rule = re.search(r"месяц (?:определяется|рассчитывается) по дате (?:совершения )?([а-яё]{4,})", raw, re.I)
         if rule:
             stem = re.sub(r"[ыияа]$", "", rule[1].casefold())
             calendar.append((ref, stem))
     # A unique allocation rule and a three-column example with explicit dates.
     if len(calendar) == 1:
-        for k,line in blocks.items():
+        for k in paths:
+            line = blocks[k]
             cells = [c.strip().lower() for c in line.strip("|").split("|")]
             if len(cells) != 3 or not re.search(r"\b" + calendar[0][1], cells[0]):
                 continue
@@ -152,7 +187,8 @@ def analyze(blocks, rows, complete):
     # Join a periodic upper bound to an independent trigger for the same effect.
     caps = []
     triggers = []
-    for ref, raw in blocks.items():
+    for ref in paths:
+        raw = blocks[ref]
         limit = re.search(r"(?:максимум|не более)\s+(?:один|одна|одно|1)\s+(?:тако[йея]\s+)?([\w-]+)\s+(?:за|в)\s+([^.;]+)", raw, re.I)
         trigger = re.search(r"(?:вызывает|инициирует)\s+([\w-]+)\s+независимо от\s+([^.;]+)", raw, re.I)
         if limit:
@@ -168,27 +204,54 @@ def analyze(blocks, rows, complete):
                     "Какое правило имеет приоритет при совпадении условий?",
                     f"Допущение: оба правила применимы к одному объекту. Период: {period}. "
                     f"Первое событие уже вызвало {effect}. До конца периода вновь выполняется условие триггера.")
-    for n,r in enumerate(reqs,1):
+    for r in reqs:
+        if VAGUE.search(r["summary"]):
+            add("verifiability", "MEDIUM", r["refs"], "Качественная характеристика требует критерия проверки.",
+                "Приёмщики могут по-разному оценить результат.", "Указать метрику или ссылку на критерий.")
+    model_rows = [r for r in rows if r["kind"] in {"issue", "question"}]
+    candidate_count = len(findings) + len(model_rows)
+    for r in model_rows:
+        category = r.get("category", "semantic")
+        # One mutation through GET is one defect even if the model cites extra context.
+        # Distinct failure modes on the same lines must remain separate.
+        claim = r["summary"].casefold()
+        same_http_effect = (re.search(r"\bget\b", claim) and
+                            re.search(r"изменени|сохран|запис|обнов|удал|мутаци|modif|mutat|writ|delet", claim))
+        matches = [f for f in findings if f["category"] == "http" and "rule" in f["detectors"]
+                   and set(f["core_refs"]) <= set(r["refs"])] if same_http_effect else []
+        if len(matches) == 1:
+            f = matches[0]
+            f.setdefault("corroboration", []).append(dict(r))
+            if "gemini" not in f["detectors"]:
+                f["detectors"].append("gemini")
+            known = {s["anchor"] for s in f["source_refs"]}
+            f["source_refs"].extend({"anchor": k, "quote": blocks[k]} for k in dict.fromkeys(r["refs"]) if k not in known)
+            f["observed_text"] = " / ".join(s["quote"] for s in f["source_refs"])
+            continue
+        severity = r.get("severity", "HIGH" if r["kind"] == "issue" else "MEDIUM")
+        f = add(category, severity, r["refs"], r["summary"], r["impact"], r["action"], r["scenario"])
+        f.update(detectors=["gemini"], criterion=r.get("criterion"))
+    for n, r in enumerate(reqs, 1):
         r["id"] = f"R-{n:03}"
-        r["findings"] = [f["id"] for f in findings if any(s["anchor"] in r["refs"] for s in f["source_refs"])]
-        if r["action"] == "Смысл и полнота требуют ревью.":
-            if r["findings"]:
-                r["action"] = "Требуется решение по связанным замечаниям."
-            elif re.search(r"\b(?:быстро|удобно|своевременно|оперативно)\b", r["summary"], re.I):
-                r["action"] = "Проверяемость требует уточнения измеримого критерия."
-                add("verifiability", "MEDIUM", r["refs"], "Качественная характеристика требует критерия проверки.",
-                    "Приёмщики могут по-разному оценить результат.", "Указать метрику или ссылку на критерий.")
-                r["findings"].append(findings[-1]["id"])
-            elif re.search(r"\d", IDENT.sub("", r["summary"])):
-                r["action"] = "Есть числовой ориентир. Проверить единицы, границы и условия применения."
-            else:
-                r["action"] = "Автопроверки явных нарушений не выявили. Полнота и бизнес-корректность требуют подтверждения."
+        r["findings"] = [f["id"] for f in findings if set(f["core_refs"]).intersection(r["refs"])]
+        if r["findings"]:
+            r["action"] = "Разобрать связанные замечания " + ", ".join(r["findings"]) + "."
+        elif r["coverage"] == "pending":
+            r["action"] = "Сверить полную формулировку с владельцем: смысловая проверка фрагмента не подтверждена."
     blockers = [f for f in findings if f["severity"] == "BLOCKER"]
     mapped = {ref for r in reqs for ref in r["refs"]}
     # Unclassified prose may contain an implicit obligation. Leave it visible to reviewers.
     unclassified = [ref for ref in paths if ref not in mapped]
-    gate = "BLOCKED" if blockers else "REVIEW" if findings or not complete or not reqs or unclassified else "READY"
+    pending = [r for r in reqs if r["coverage"] == "pending"]
+    open_assessments = [r["id"] for r in reqs if any(a["assessment"] != "grounded" for a in r["model_assessments"])]
+    gate = "BLOCKED" if blockers else "REVIEW" if findings or not complete or not reqs or unclassified or pending or open_assessments else "READY"
     links = [{"from":r["id"], "to":k, "relation":"source"} for r in reqs for k in r["refs"]]
     links.extend({"from":r["id"], "to":f, "relation":"finding"} for r in reqs for f in r["findings"])
+    from assessment import assess, acceptance_links
+    links.extend(acceptance_links(reqs, blocks, paths))
+    criteria = assess(reqs, findings, unclassified + [r["refs"][0] for r in pending])
     return dict(requirements=reqs, findings=findings, gate=gate, links=links,
+                candidate_count=candidate_count, pending_requirements=[r["id"] for r in pending],
+                open_assessments=open_assessments,
+                set_criteria=criteria, criteria_profile="29148:2018 / SpecGuard 1",
                 unclassified_refs=unclassified)
