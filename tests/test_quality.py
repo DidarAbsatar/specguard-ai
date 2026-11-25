@@ -28,8 +28,8 @@ class QualityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             src, out = Path(tmp)/"in.txt", Path(tmp)/"out.json"
             src.write_text("Сервис должен вернуть ответ.", encoding="utf8")
-            with patch("local_review.review", side_effect=TimeoutError):
-                code = main(["validate", str(src), "--output", str(out), "--ollama", "test"])
+            with patch("specguard.semantic", side_effect=TimeoutError):
+                code = main(["validate", str(src), "--output", str(out), "--allow-cloud"])
             self.assertEqual(code, 2)
             result = json.loads(out.read_text(encoding="utf8"))
             self.assertEqual(result["gate"], "REVIEW")

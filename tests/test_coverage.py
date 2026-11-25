@@ -16,7 +16,8 @@ def analyze_lines(*lines):
 
 
 class CoverageTests(unittest.TestCase):
-    def test_cloud_candidates_use_local_verifier(self):
+    @patch.dict("os.environ", {"GEMINI_MODEL": "test-gemini"})
+    def test_cloud_candidates_use_same_gemini_verifier(self):
         with tempfile.TemporaryDirectory() as folder:
             src, out = Path(folder) / "input.md", Path(folder) / "result.json"
             src.write_text("R-1. Ответить за 2 секунды.", encoding="utf8")
@@ -24,24 +25,24 @@ class CoverageTests(unittest.TestCase):
                        impact="", action="Срок указан.", scenario="")
             issue = dict(req, kind="issue", summary="Отсутствует срок.")
             with patch("specguard.semantic", return_value=[req, issue]), patch(
-                "local_review.request_json", return_value={"keep": False, "reason": "Срок указан в цитате."}
+                "specguard.gemini_json", return_value=[{"id": 0, "keep": False, "reason": "Срок указан в цитате."}]
             ) as check:
                 rc = main(["validate", str(src), "--output", str(out), "--allow-cloud",
-                           "--verify-with-ollama", "local-test"])
+                           "--verify"])
             self.assertEqual(rc, 0)
             check.assert_called_once()
             report = json.loads(out.read_text(encoding="utf8"))
             self.assertEqual(report["findings"], [])
             self.assertEqual(report["verification"][0]["kind"], "rejected")
-            self.assertEqual(report["manifest"]["Модель сверки цитат"], "local-test")
+            self.assertEqual(report["manifest"]["Модель сверки цитат"], "test-gemini")
 
     def test_unclassified_obligation_survives_successful_model_call(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "input.md"
             out = Path(folder) / "output.json"
             source.write_text("# Требования\nR-1. Отображать баланс.\n## Экран входа\nПри ошибке появляется сообщение.", encoding="utf8")
-            with patch("local_review.review", return_value=[]):
-                self.assertEqual(main(["validate", str(source), "--ollama", "test", "--output", str(out)]), 0)
+            with patch("specguard.semantic", return_value=[]):
+                self.assertEqual(main(["validate", str(source), "--allow-cloud", "--output", str(out)]), 0)
             run = json.loads(out.read_text(encoding="utf8"))
             self.assertEqual(run["gate"], "REVIEW")
             self.assertEqual(run["unclassified_refs"], ["P1L4"])

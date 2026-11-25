@@ -18,25 +18,25 @@ CASES = [
 ]
 
 
-def run(model=None, hybrid=False):
+def run(cloud=False, hybrid=False):
     tp = fp = fn = 0
     failures = 0
     started = time.monotonic()
     for lines, expected in CASES:
         src = {f"P1L{i}": v for i,v in enumerate(lines,1)}
-        if model:
-            from local_review import review, verify
+        if cloud:
+            from specguard import semantic, verify_candidates
             try:
-                rows = review(src, model)
+                rows = semantic(src)
                 if hybrid:
-                    rows = [r for r in verify(rows, src, model) if r["kind"] != "rejected"]
+                    rows = [r for r in verify_candidates(rows, src) if r["kind"] != "rejected"]
             except (ValueError, OSError, KeyError):
                 failures += 1
                 rows = []
-            actual = {tuple(sorted(int(k[3:]) for k in r["refs"])) for r in rows}
+            actual = {tuple(sorted(int(k[3:]) for k in r["refs"])) for r in rows if r["kind"] != "requirement"}
             if hybrid:
-                actual.update(tuple(sorted(int(s["anchor"][3:]) for s in f["source_refs"]))
-                              for f in analyze(src, [], False)["findings"])
+                actual = {tuple(sorted(int(s["anchor"][3:]) for s in f["source_refs"]))
+                          for f in analyze(src, rows, True)["findings"]}
             gold = {anchors for category, anchors in expected}
         else:
             findings = analyze(src, [], False)["findings"]
@@ -46,19 +46,23 @@ def run(model=None, hybrid=False):
         fp += len(actual - gold)
         fn += len(gold - actual)
     return dict(documents=len(CASES), failures=failures, elapsed_s=round(time.monotonic()-started,2),
-                matching="anchors only" if model else "category and anchors",
+                matching="anchors only" if cloud else "category and anchors",
                 true_positive=tp, false_positive=fp, false_negative=fn,
                 precision=tp/(tp+fp) if tp+fp else None, recall=tp/(tp+fn) if tp+fn else None)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--baseline", help="Local Ollama model")
-    parser.add_argument("--hybrid", action="store_true", help="Правила и повторная проверка кандидатов модели")
+    parser.add_argument("--allow-cloud", action="store_true", help="Отправить тестовые документы в Gemini")
+    parser.add_argument("--hybrid", action="store_true", help="Добавить правила и сверку замечаний в Gemini")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    result = json.dumps(run(args.baseline, args.hybrid), indent=2)
+    if args.hybrid and not args.allow_cloud:
+        parser.error("--hybrid требует --allow-cloud")
+    metrics = run(args.allow_cloud, args.hybrid)
+    result = json.dumps(metrics, indent=2)
     if args.output:
         args.output.parent.mkdir(exist_ok=True, parents=True)
         args.output.write_text(result, encoding="utf8")
     print(result)
+    raise SystemExit(2 if metrics["failures"] else 0)
