@@ -26,7 +26,7 @@ def format_report(run, suffix):
         lines += [f"На ручную сверку формулировок — **{len(run['pending_requirements'])}**. "
                   f"Строк вне карты — **{len(run['unclassified_refs'])}**. "
                   f"Открытых оценок модели по требованиям — **{len(run.get('open_assessments', []))}**. "
-                  f"После сверки с цитатами поступило {run['candidate_count']} замечаний, "
+                  f"До объединения было {run['candidate_count']} замечаний, "
                   f"после объединения — {len(findings)}.", ""]
     ordered = sorted(findings, key=lambda f: (["BLOCKER","HIGH","MEDIUM","LOW"].index(f["severity"]),
                      f["status"] != "CONFIRMED", -len(f.get("detectors", [])), f["id"]))
@@ -36,6 +36,11 @@ def format_report(run, suffix):
                   f"Последствие для реализации или приёмки — {display(top['impact'])}", ""]
     lines += ["## Паспорт прогона", ""]
     lines.extend(f"- **{k}** — {display(v)}" for k,v in run["manifest"].items())
+    for call in run.get("llm_calls", []):
+        stage = {"analysis": "анализ", "verification": "сверка"}[call["stage"]]
+        tokens = call.get("usage", {}).get("totalTokenCount", "нет данных")
+        status = "получен JSON" if call["status"] == "received_json" else display(call.get("error", "ошибка"))
+        lines.append(f"- Запрос Gemini · {stage} · {status} · {call['elapsed_ms']} мс · токены по данным API — {tokens}.")
     if run.get("verification"):
         rejected = sum(r["kind"] == "rejected" for r in run["verification"])
         lines += [f"- Повторная сверка с цитатами — проверено {len(run['verification'])}, отклонено {rejected}."]
@@ -77,7 +82,47 @@ def format_report(run, suffix):
         lines += ["", "## Строки вне карты требований", "",
                   f"Проверьте {len(pending)} строк: среди них могут быть контекст, заголовки таблиц и пропущенные обязательства.", ""]
         lines.extend(f"- {ref} · {display(run['sources'][ref])}" for ref in pending)
-    md = "\n".join(lines)
+    return render_markdown("\n".join(lines), suffix, "Результат ревью")
+
+
+def format_comparison(run, suffix):
+    if suffix == ".json":
+        return json.dumps(run, ensure_ascii=False, indent=2)
+    counts = run["counts"]
+    labels = {"FIX_CONFIRMED": "Исправление доказано", "PERSISTS": "Замечание сохранилось",
+              "CHECK": "Устранение требует сверки", "NEW_OBSERVATION": "Обнаружено без пары в прошлой редакции"}
+    lines = ["# SpecGuard AI · Сравнение редакций", "", "## Итог проверки правил", "",
+             f"Замечаний в исходной редакции — **{run['before_count']}**, в новой — **{run['after_count']}**.", "",
+             f"Доказано исправлений — **{counts['FIX_CONFIRMED']}**. Сохранилось — **{counts['PERSISTS']}**. "
+             f"На ручную сверку — **{counts['CHECK']}**. Без пары в прошлой редакции — **{counts['NEW_OBSERVATION']}**.", "",
+             "Обе редакции проверены одним набором правил. Для полной смысловой оценки новой редакции предусмотрен отдельный прогон Gemini.", ""]
+    for e in sorted(run["changes"], key=lambda entry: list(labels).index(entry["status"])):
+        ids = " → ".join(i for i in (e["previous_id"], e["current_id"]) if i)
+        lines += [f"### {labels[e['status']]} · {ids}", "", display(e["reason"]), "", display(e["impact"]), ""]
+        for key, label in (("before", "Было"), ("after", "Стало")):
+            for s in e[key]:
+                lines += [f"> **{label} · {display(s['anchor'])}** {display(s['quote'])}", ""]
+        if e.get("proof", {}).get("kind") == "feasible_interval":
+            p = e["proof"]
+            sample = f"{p['witness']:,}".replace(",", " ") + " " + display(p["unit"])
+            if p["unit"] == "секунд" and p["witness"] > 0 and p["witness"] % 3600 == 0:
+                sample = f"{p['witness'] // 3600} ч ({sample})"
+            lines += [f"**Проверочное значение для QA — {sample}.** "
+                      f"Оно входит в новый интервал [{p['after_min']}, {p['after_max']}].", ""]
+        if e.get("proof", {}).get("kind") == "calendar_alignment":
+            p = e["proof"]
+            months = ("", "январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август",
+                      "сентябрь", "октябрь", "ноябрь", "декабрь")
+            lines += [f"**Ожидаемый период для QA — {months[p['event_month']]}.** При тех же условиях "
+                      f"прежний пример указывал {months[p['before_expected']]}. Новый пример совпадает с правилом учёта.", ""]
+        lines += [display(e["action"]), ""]
+    lines += ["## Паспорт сравнения", "", f"- Версия — {display(run['version'])} · сборка {display(run['build'])}."]
+    for label, doc in (("Исходная редакция", run["before"]), ("Новая редакция", run["after"])):
+        lines.append(f"- {label} — {display(doc['name'])} · SHA-256 `{doc['sha256']}`.")
+    return render_markdown("\n".join(lines), suffix, "Сравнение редакций")
+
+
+def render_markdown(md, suffix, title):
     if suffix == ".md":
         return md
     body = MarkdownIt("commonmark", {"html": False}).enable("table").render(md)
@@ -86,13 +131,13 @@ def format_report(run, suffix):
         if not sections:
             sections.append(section)
             continue
-        title, content = section.split("</h2>", 1)
-        if title.startswith(("Паспорт", "Строки вне", "Карта и", "Критерии качества")):
-            sections.append(f"<details><summary>{title}</summary>{content}</details>")
+        heading, content = section.split("</h2>", 1)
+        if heading.startswith(("Паспорт", "Строки вне", "Карта и", "Критерии качества")):
+            sections.append(f"<details><summary>{heading}</summary>{content}</details>")
         else:
-            sections.append(f"<section><h2>{title}</h2>{content}</section>")
+            sections.append(f"<section><h2>{heading}</h2>{content}</section>")
     return ('<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" '
-            'content="width=device-width, initial-scale=1"><title>SpecGuard AI · Результат ревью</title>'
+            f'content="width=device-width, initial-scale=1"><title>SpecGuard AI · {title}</title>'
             '<style>body{font:16px/1.55 "Source Sans 3","Segoe UI",sans-serif;color:#173440;background:#f4f7f8;'
             'max-width:1020px;margin:auto;padding:clamp(12px,3vw,40px)}main{background:white;padding:clamp(16px,4vw,54px);'
             'border-top:6px solid #106854}h1{line-height:1.15}h2,summary{color:#0a5848}summary{cursor:pointer;'

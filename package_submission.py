@@ -1,18 +1,19 @@
 """Assemble the BCC hand-in from a completed run and the matching checkout."""
 import argparse
+import getpass
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from reporting import format_report
-from specguard import VERSION, extract
+from specguard import ENGINE, VERSION, build_id, extract, main as validate_cli
 
 ROOT = Path(__file__).resolve().parent
-ENGINE = ("specguard.py", "quality.py", "assessment.py", "reporting.py")
 
 
 def build_package(document, report_path, output):
@@ -31,11 +32,11 @@ def build_package(document, report_path, output):
         if not finding["source_refs"] or any(run["sources"].get(s["anchor"]) != s["quote"] for s in finding["source_refs"]):
             raise ValueError("Цитата замечания расходится с исходником.")
     names = [*ENGINE, "pyproject.toml", "package_submission.py", "benchmark.py", "README.md", "AGENTS.md",
-             ".gitignore", ".env.example", ".github/workflows/tests.yml"]
+             ".gitignore", ".gitattributes", ".env.example", ".github/workflows/tests.yml"]
     for pattern in ("docs/*.md", "tests/test_*.py", "examples/retention/*.md"):
         names.extend(p.relative_to(ROOT).as_posix() for p in sorted(ROOT.glob(pattern)))
     files = {n: (ROOT / n).read_bytes() for n in names}
-    fingerprint = hashlib.sha256(b"".join(files[n].replace(b"\r\n", b"\n") for n in ENGINE)).hexdigest()[:16]
+    fingerprint = build_id(files)
     if manifest["Версия"] != VERSION or manifest["Сборка"] != fingerprint:
         raise ValueError("Версия исходников или отпечаток движка отличается от паспорта.")
     src = io.BytesIO()
@@ -56,14 +57,53 @@ def build_package(document, report_path, output):
         temporary.unlink(missing_ok=True)
 
 
-if __name__ == "__main__":
+def run_and_package(document, output):
+    if output.suffix.lower() != ".zip" or output.resolve() == document.resolve():
+        raise ValueError("Укажите отдельный ZIP для комплекта.")
+    if not document.is_file():
+        raise ValueError("Входной документ не найден.")
+    output.parent.mkdir(exist_ok=True, parents=True)
+    with tempfile.NamedTemporaryFile(prefix=output.stem + "-run-", suffix=".json", dir=output.parent, delete=False) as handle:
+        review = Path(handle.name)
+    try:
+        code = validate_cli(["validate", str(document), "--allow-cloud", "--verify", "--output", str(review)])
+        if code:
+            if review.stat().st_size:
+                print(f"Частичный отчёт сохранён в {review}", file=sys.stderr)
+            return code
+        build_package(document, review, output)
+        review.unlink()
+        return 0
+    finally:
+        if review.exists() and not review.stat().st_size:
+            review.unlink()
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("document", type=Path)
-    parser.add_argument("report", type=Path)
+    parser.add_argument("report", type=Path, nargs="?", help="JSON завершённого прогона")
+    parser.add_argument("--allow-cloud", action="store_true", help="Отправить документ в Gemini и собрать ZIP")
     parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.allow_cloud == bool(args.report):
+        parser.error("Выберите сохранённый JSON или новый прогон с --allow-cloud.")
     try:
-        build_package(args.document, args.report, args.output)
+        if args.allow_cloud:
+            os.environ.setdefault("GEMINI_MODEL", "gemini-3.5-flash")
+            if not os.environ.get("GEMINI_API_KEY") and sys.stdin.isatty():
+                os.environ["GEMINI_API_KEY"] = getpass.getpass("Ключ Gemini (ввод скрыт): ")
+            code = run_and_package(args.document, args.output)
+            if code:
+                return code
+        else:
+            build_package(args.document, args.report, args.output)
     except (ValueError, OSError, KeyError, TypeError) as exc:
-        parser.exit(1, f"Комплект не собран: {exc}\n")
+        print(f"Комплект не собран: {exc}", file=sys.stderr)
+        return 1
     print(args.output)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

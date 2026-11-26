@@ -1,7 +1,9 @@
 """Evidence-linked review of normative statements and their acceptance examples."""
 import re
+from calendar import monthrange
 from collections import defaultdict
 from itertools import combinations
+from typing import NamedTuple
 
 IDENT = re.compile(r"^(?:[-*\s]|\*\*)*([A-ZА-ЯЁ]{1,12}-\d+)\b[.:]?\**\s*", re.I)
 BOUND = re.compile(r"^(.+?)\s+(?:долж(?:ен|на|но|ны)\s+(?:быть|составлять)\s+)?(не менее|не более|минимум|максимум)\s+(\d+)\s+([а-яёa-z%₸]+)[.!]?$", re.I)
@@ -16,6 +18,62 @@ HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
 CONTRACT_FIELD = re.compile(r"^\|\s*[*`]*(?:authorization|авторизация|http method|rest type|content-type|request url)[*`]*\s*\|", re.I)
 VAGUE = re.compile(r"\b(?:быстро|удобно|своевременно|оперативно)\b", re.I)
 PENDING = "Смысл и полнота требуют ревью."
+MONTHS = ("январ", "феврал", "март", "апрел", "ма[йяе]", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр")
+
+
+class Bound(NamedTuple):
+    subject: str
+    unit: str
+    minimum: bool
+    value: int
+
+
+def parse_bound(raw):
+    match = BOUND.fullmatch(IDENT.sub("", raw).strip())
+    if not match:
+        return None
+    subject, op, value, unit = match.groups()
+    unit = unit.casefold()
+    scale = TIME_SCALE.get(unit)
+    if scale:
+        unit = "секунд"
+    elif re.fullmatch(r"байт(?:а|ов|ы)?", unit):
+        unit = "байт"
+    return Bound(subject.casefold(), unit, op.casefold() in {"не менее", "минимум"}, int(value) * (scale or 1))
+
+
+def calendar_checks(blocks, paths):
+    def month(word):
+        return next((n for n, pattern in enumerate(MONTHS, 1) if re.match(pattern, word)), None)
+
+    def date_month(cell):
+        match = re.search(r"\b(\d{1,2})\s+([а-яё]+)", cell)
+        if match:
+            number = month(match[2])
+            if number and 1 <= int(match[1]) <= monthrange(2000, number)[1]:
+                return number
+        return None
+
+    rules = defaultdict(list)
+    for ref, path in paths.items():
+        match = re.search(r"месяц (?:определяется|рассчитывается) по дате (?:совершения )?([а-яё]{4,})", blocks[ref], re.I)
+        if match:
+            rules[path[:1]].append((ref, re.sub(r"[ыияа]$", "", match[1].casefold())))
+    checks = []
+    for ref, path in paths.items():
+        candidates = rules.get(path[:1], [])
+        if len(candidates) != 1 or not blocks[ref].startswith("|"):
+            continue
+        rule, stem = candidates[0]
+        cells = [v.strip().casefold() for v in blocks[ref].strip("|").split("|")]
+        if len(cells) != 3 or not re.search(r"\b" + stem, cells[0]):
+            continue
+        if not re.search("вырос|увелич", cells[2]) or re.search(r"\bне\b", cells[2]):
+            continue
+        event, posting, expected = date_month(cells[0]), date_month(cells[1]), month(cells[2])
+        if event and posting and expected and event != posting:
+            checks.append(dict(rule=rule, example=ref, event_month=event, posting_month=posting, expected_month=expected))
+    return checks
 
 
 def section_paths(blocks):
@@ -97,9 +155,9 @@ def reconcile(blocks, paths, rows):
                 actions.append(row["action"].strip())
             if row.get("assessment"):
                 assessments.append({k: row[k] for k in ("summary", "criterion", "assessment", "action")})
-        # Punctuation and Markdown syntax do not constitute a separate obligation.
+        # Require operators, signs, units and decimal separators as well as words.
         req["coverage"] = "reviewed" if covered and all(
-            i in covered for i, ch in enumerate(clause) if ch.isalnum()) else "pending"
+            i in covered for i, ch in enumerate(clause.rstrip(" .;")) if not ch.isspace()) else "pending"
         if req["coverage"] == "reviewed" and actions:
             req["action"] = " ".join(dict.fromkeys(actions))
         req["model_assessments"] = assessments
@@ -127,63 +185,46 @@ def analyze(blocks, rows, complete):
         if re.search(r"\b(TBD|TBS|TBR)\b", text):
             add("placeholder", "MEDIUM", [ref], "Присутствует маркер открытого решения.",
                 "Ожидаемый результат требует уточнения.", "Заполнить значение или объяснить маркер.")
-        match = BOUND.fullmatch(text) if ref in paths else None
-        if match:
-            subject, op, value, unit = match.groups()
-            unit = unit.casefold()
-            scale = TIME_SCALE.get(unit)
-            if re.fullmatch(r"байт(?:а|ов|ы)?", unit):
-                unit = "байт"
-            bounds.setdefault((paths[ref], subject.casefold(), "секунд" if scale else unit), []).append(
-                (op.lower() in {"не менее", "минимум"}, int(value) * (scale or 1), ref))
+        bound = parse_bound(raw)
+        if bound:
+            bounds.setdefault((paths[ref], bound.subject, bound.unit), []).append((bound.minimum, bound.value, ref))
     for (_, subject, unit), entries in bounds.items():
         for a, b in combinations(entries, 2):
             lower, upper = sorted((a,b), reverse=True)
             if lower[0] and not upper[0] and lower[1] > upper[1]:
-                add("bounds", "BLOCKER", [lower[2], upper[2]], "В одном разделе заданы несовместимые границы.",
+                finding = add("bounds", "BLOCKER", [lower[2], upper[2]], "В одном разделе заданы несовместимые границы.",
                     "Нельзя выбрать значение, удовлетворяющее обоим условиям.", "Согласовать область действия и диапазон.",
                     f"{subject} = {upper[1]} {unit} нарушает минимум {lower[1]}. Любое большее значение нарушает максимум.", True)
+                finding["proof"] = dict(kind="empty_interval", subject=subject, unit=unit,
+                                        minimum=lower[1], maximum=upper[1])
     # A contract can have multiple endpoints. Limit matching to the same API section.
     method = None
     for ref, raw in blocks.items():
-        if raw.startswith("# ") or raw.startswith("## "):
-            method = None
         if ref not in paths:
             continue
+        path = paths[ref]
+        if method:
+            method_ref, scope = method
+            if path[:len(scope)] != scope or (not scope and path != paths[method_ref]):
+                method = None
         cells = [c.strip(" *`").casefold() for c in raw.strip("|").split("|")]
         if len(cells) == 2 and cells[0] in {"метод", "rest type", "http method", "метод http"}:
-            method = ref if cells[1] == "get" else None
+            scope = path
+            if path and re.fullmatch("общие параметры|метаданные|metadata", path[-1][1], re.I):
+                scope = path[:-1]
+            method = (ref, scope) if cells[1] == "get" else None
         if method and re.match(r"^(?:\d+[.)]\s*)?(?:заменить|удалить|сохранить|обновить)\s", raw, re.I):
-            add("http", "HIGH", [method, ref], "Контракт GET содержит операцию изменения состояния.",
+            add("http", "HIGH", [method[0], ref], "Контракт GET содержит операцию изменения состояния.",
                 "Клиент может повторить запрос как безопасное чтение.", "Согласовать метод и эффект повторного запроса.",
                 "Клиент повторяет тот же GET. Должно ли измениться сохранённое состояние?")
-    months = ("январ","феврал","март","апрел","ма[йяе]","июн","июл","август","сентябр","октябр","ноябр","декабр")
-    calendar = []
-    for ref in paths:
-        raw = blocks[ref]
-        rule = re.search(r"месяц (?:определяется|рассчитывается) по дате (?:совершения )?([а-яё]{4,})", raw, re.I)
-        if rule:
-            stem = re.sub(r"[ыияа]$", "", rule[1].casefold())
-            calendar.append((ref, stem))
-    # A unique allocation rule and a three-column example with explicit dates.
-    if len(calendar) == 1:
-        for k in paths:
-            line = blocks[k]
-            cells = [c.strip().lower() for c in line.strip("|").split("|")]
-            if len(cells) != 3 or not re.search(r"\b" + calendar[0][1], cells[0]):
-                continue
-            purchase = re.search(r"\b\d{1,2}\s+([а-яё]+)", cells[0])
-            posted = re.search(r"\b\d{1,2}\s+([а-яё]+)", cells[1])
-            if not purchase or not posted:
-                continue
-            for month in months:
-                if (re.match(month, posted[1]) and not re.match(month, purchase[1])
-                        and re.match(month, cells[2]) and re.search("вырос|увелич", cells[2])):
-                    add("calendar", "HIGH", [calendar[0][0], k],
-                        "Пример относит изменение счётчика к месяцу второго события. Правило указывает на первое.",
-                        "QA и разработчик получат разные ожидаемые суммы за один период.",
-                        "Согласовать дату учёта и исправить правило или критерий приёмки.",
-                        " → ".join(c.strip() for c in line.strip("|").split("|")))
+    calendar = calendar_checks(blocks, paths)
+    for check in calendar:
+        if check["expected_month"] != check["event_month"]:
+            add("calendar", "HIGH", [check["rule"], check["example"]],
+                "Ожидаемый месяц счётчика в примере расходится с месяцем события, указанного в правиле.",
+                "QA и разработчик получат разные ожидаемые суммы за один период.",
+                "Согласовать дату учёта и исправить правило или критерий приёмки.",
+                " → ".join(c.strip() for c in blocks[check["example"]].strip("|").split("|")))
     # Join a periodic upper bound to an independent trigger for the same effect.
     caps = []
     triggers = []
@@ -197,7 +238,7 @@ def analyze(blocks, rows, complete):
             triggers.append((ref, trigger[1].lower(), trigger[2]))
     for bound, effect, period in caps:
         for repeat, action, history in triggers:
-            if effect == action and bound != repeat:
+            if effect == action and bound != repeat and paths[bound][:1] == paths[repeat][:1]:
                 add("state", "HIGH", [bound, repeat],
                     f"Для «{effect}» заданы предел за период и триггер независимо от {history}.",
                     "Две реализации могут выбрать разные результаты при повторном срабатывании.",
@@ -250,7 +291,7 @@ def analyze(blocks, rows, complete):
     from assessment import assess, acceptance_links
     links.extend(acceptance_links(reqs, blocks, paths))
     criteria = assess(reqs, findings, unclassified + [r["refs"][0] for r in pending])
-    return dict(requirements=reqs, findings=findings, gate=gate, links=links,
+    return dict(requirements=reqs, findings=findings, gate=gate, links=links, calendar_checks=calendar,
                 candidate_count=candidate_count, pending_requirements=[r["id"] for r in pending],
                 open_assessments=open_assessments,
                 set_criteria=criteria, criteria_profile="29148:2018 / SpecGuard 1",

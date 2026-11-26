@@ -41,15 +41,16 @@ def run(cloud=False, hybrid=False, suite="core"):
     details = []
     for index, (lines, expected) in enumerate(cases, 1):
         src = {f"P1L{i}": v for i,v in enumerate(lines,1)}
+        calls = []
         if cloud:
             from specguard import semantic, verify_candidates
             try:
-                rows = semantic(src)
+                rows = semantic(src, calls=calls)
                 if hybrid:
-                    rows = [r for r in verify_candidates(rows, src) if r["kind"] != "rejected"]
+                    rows = [r for r in verify_candidates(rows, src, calls=calls) if r["kind"] != "rejected"]
             except (ValueError, OSError, KeyError, TypeError, IndexError) as exc:
                 failures += 1
-                details.append(dict(document=index, error=type(exc).__name__))
+                details.append(dict(document=index, error=type(exc).__name__, llm_calls=calls))
                 continue
             if not hybrid:
                 actual = [(r["category"], tuple(sorted({int(k[3:]) for k in r["refs"]})))
@@ -64,7 +65,8 @@ def run(cloud=False, hybrid=False, suite="core"):
         tp += hits
         fp += extra
         fn += missed
-        details.append(dict(document=index, expected=expected, predicted=actual, tp=hits, fp=extra, fn=missed))
+        details.append(dict(document=index, expected=expected, predicted=actual, tp=hits, fp=extra, fn=missed,
+                            llm_calls=calls))
     return dict(documents=len(cases), completed=len(cases)-failures, suite=suite, failures=failures,
                 status="INCOMPLETE" if failures else "COMPLETE", cases=details,
                 elapsed_s=round(time.monotonic()-started,2), matching="category and core anchors, counting duplicates",

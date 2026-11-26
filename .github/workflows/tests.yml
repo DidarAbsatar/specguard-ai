@@ -2,12 +2,25 @@ name: SpecGuard validation
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.11'
+          - os: windows-latest
+            python: '3.12'
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
       - run: python -m pip install .
       - run: python -m unittest discover -s tests
       - run: python benchmark.py
+      - name: Reproduce the jury example with the installed CLI
+        shell: bash
+        run: |
+          specguard compare examples/retention/before.md examples/retention/after.md --output reports/comparison.md
+          python -c "from pathlib import Path; assert Path('reports/comparison.md').read_text('utf8') == Path('docs/EXAMPLE_COMPARISON.md').read_text('utf8')"
+          cat reports/comparison.md >> "$GITHUB_STEP_SUMMARY"
