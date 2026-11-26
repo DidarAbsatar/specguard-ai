@@ -11,6 +11,7 @@ import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from reporting import format_report
+from provenance import revision
 from specguard import ENGINE, VERSION, build_id, extract, main as validate_cli
 
 ROOT = Path(__file__).resolve().parent
@@ -22,7 +23,7 @@ def build_package(document, report_path, output):
     report_bytes = report_path.read_bytes()
     run = json.loads(report_bytes)
     manifest = run["manifest"]
-    if (manifest["Семантическая проверка"] != "выполнен"
+    if (manifest["Семантическая проверка"] != "выполнена"
             or manifest["Сверка цитат"] not in {"выполнена", "нет кандидатов"}):
         raise ValueError("Для сдачи необходим завершённый прогон с --allow-cloud --verify.")
     document_bytes = document.read_bytes()
@@ -31,7 +32,7 @@ def build_package(document, report_path, output):
     for finding in run["findings"]:
         if not finding["source_refs"] or any(run["sources"].get(s["anchor"]) != s["quote"] for s in finding["source_refs"]):
             raise ValueError("Цитата замечания расходится с исходником.")
-    names = [*ENGINE, "pyproject.toml", "package_submission.py", "benchmark.py", "README.md", "AGENTS.md",
+    names = [*ENGINE, "pyproject.toml", "setup.py", "package_submission.py", "benchmark.py", "README.md", "AGENTS.md",
              ".gitignore", ".gitattributes", ".env.example", ".github/workflows/tests.yml"]
     for pattern in ("docs/*.md", "tests/test_*.py", "examples/retention/*.md"):
         names.extend(p.relative_to(ROOT).as_posix() for p in sorted(ROOT.glob(pattern)))
@@ -39,6 +40,10 @@ def build_package(document, report_path, output):
     fingerprint = build_id(files)
     if manifest["Версия"] != VERSION or manifest["Сборка"] != fingerprint:
         raise ValueError("Версия исходников или отпечаток движка отличается от паспорта.")
+    commit = revision(ROOT, fingerprint)
+    if not commit or commit != manifest.get("Git SHA"):
+        raise ValueError("Git SHA прогона должен совпадать с проверенной версией исходников.")
+    files["_specguard_release.py"] = f"# {commit} {fingerprint}\n".encode("ascii")
     src = io.BytesIO()
     with ZipFile(src, "w", ZIP_DEFLATED) as archive:
         for name, data in files.items():

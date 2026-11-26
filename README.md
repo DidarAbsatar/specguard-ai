@@ -2,7 +2,7 @@
 
 CLI проверяет банковское ТЗ перед передачей в разработку и QA. Для демонстрации откройте HTML-отчёт в браузере. В каждой карточке указаны основание, бизнес-последствие, источник и вопрос аналитику. Тот же результат можно сохранить в JSON.
 
-Версия 0.5.0. [Пример отчёта об исправлении](docs/EXAMPLE_COMPARISON.md) · [Устройство проверки](docs/ARCHITECTURE.md) · [Сценарий защиты](docs/DEMO.md).
+Версия 0.6.0. В начале отчёта аналитик видит решения для разработки и QA, первый вопрос владельцу и исходные строки, по которым можно проверить ответ. [Пример отчёта об исправлении](docs/EXAMPLE_COMPARISON.md) · [Устройство проверки](docs/ARCHITECTURE.md) · [Сценарий защиты](docs/DEMO.md).
 
 ## Установка и запуск
 
@@ -68,11 +68,11 @@ Benchmark содержит 17 синтетических документов. �
 Если Gemini вернул HTTP 503, агент делает максимум одну дополнительную попытку на этапе. Обычная пауза — две секунды. Числовой Retry-After до 15 секунд задаёт паузу провайдера, при более долгом ожидании запуск завершается с диагностикой. Попытки перечислены в `llm_calls`.
 
 ```powershell
-.\.venv\Scripts\python package_submission.py reports/requirements.md --allow-cloud --output reports/v0.5.0/SpecGuard-BCC.zip
+.\.venv\Scripts\python package_submission.py reports/requirements.md --allow-cloud --output reports/v0.6.0/SpecGuard-BCC.zip
 ```
 
-Для сборки комплекта используйте тот же файл входа и JSON успешного прогона с `--verify`. Команда сверяет отпечатки движка и документа, координаты и цитаты. В ZIP попадут исходники, исходный документ, JSON и читаемый HTML.
+Скопируйте выданный файл в `reports/requirements.md` либо передайте собственный путь. Для сдачи запустите команду из чистого клона публичного коммита. Поле `Git SHA` в паспорте позволяет жюри открыть исходники этого прогона. При установке из клона идентификатор переносится в wheel. Для сборки из готового JSON команда сверяет идентификатор версии, отпечатки движка и документа, координаты и цитаты. В ZIP попадут исходники, исходный документ, JSON и читаемый HTML.
 
 ```powershell
-.\.venv\Scripts\python package_submission.py reports/requirements.md reports/v0.5.0/verified.json --output reports/v0.5.0/SpecGuard-BCC.zip
+.\.venv\Scripts\python package_submission.py reports/requirements.md reports/v0.6.0/verified.json --output reports/v0.6.0/SpecGuard-BCC.zip
 ```

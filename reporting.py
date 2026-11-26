@@ -1,6 +1,7 @@
 """Human-readable and machine-readable views of the same run."""
 import json
 import re
+from decimal import Decimal
 from markdown_it import MarkdownIt
 from assessment import INDIVIDUAL, SET
 
@@ -17,8 +18,13 @@ def format_report(run, suffix):
     reqs, findings = run["requirements"], run["findings"]
     lines = ["# SpecGuard AI · Ревью требований", "", "## Решение", "",
              f"**{run['gate']}** · Требований: {len(reqs)} · Замечаний: {len(findings)} · "
-             f"Блокирующих: {sum(f['severity']=='BLOCKER' for f in findings)}", "",
-             {"REVIEW":"Перед передачей в разработку проверить открытые вопросы и полноту анализа.",
+             f"Блокирующих: {sum(f['severity']=='BLOCKER' for f in findings)}", ""]
+    decision = run.get("decision", {})
+    if decision:
+        lines += [f"**Разработка** — {decision['development']}", "",
+                  f"**Тестирование и приёмка** — {decision['testing']}", ""]
+    else:
+        lines += [{"REVIEW":"Перед передачей в разработку проверить открытые вопросы и полноту анализа.",
               "BLOCKED":"До разработки согласовать несовместимые условия, перечисленные первыми.",
               "READY":"В пределах выполненных проверок препятствий к разработке и тестированию не обнаружено."}[run["gate"]],
              ""]
@@ -28,14 +34,24 @@ def format_report(run, suffix):
                   f"Открытых оценок модели по требованиям — **{len(run.get('open_assessments', []))}**. "
                   f"До объединения было {run['candidate_count']} замечаний, "
                   f"после объединения — {len(findings)}.", ""]
-    ordered = sorted(findings, key=lambda f: (["BLOCKER","HIGH","MEDIUM","LOW"].index(f["severity"]),
-                     f["status"] != "CONFIRMED", -len(f.get("detectors", [])), f["id"]))
+    by_id = {f["id"]: f for f in findings}
+    ordered = ([by_id[i] for i in decision["order"]] if decision else
+               sorted(findings, key=lambda f: (["BLOCKER","HIGH","MEDIUM","LOW"].index(f["severity"]),
+                      f["status"] != "CONFIRMED", -len(f.get("detectors", [])), f["id"])))
     if ordered:
         top = ordered[0]
         lines += [f"**Первое решение · {top['id']}** — {display(top['recommended_fix'])}", "",
                   f"Последствие для реализации или приёмки — {display(top['impact'])}", ""]
+        if decision:
+            first = decision["first"]
+            lines += [f"Кому адресовать — {first['owner']}. {first['reason']}", "",
+                      "Основания — " + ", ".join(first["refs"]) + ".", ""]
+            if first["scenario"]:
+                lines += ["Сценарий для согласования с QA — " + display(first["scenario"]), ""]
+    elif decision.get("next_step"):
+        lines += [decision["next_step"], "", ", ".join(decision["pending_refs"]), ""]
     lines += ["## Паспорт прогона", ""]
-    lines.extend(f"- **{k}** — {display(v)}" for k,v in run["manifest"].items())
+    lines.extend(f"- **{k}** — {display(v) if v is not None else 'не подтверждён'}" for k,v in run["manifest"].items())
     for call in run.get("llm_calls", []):
         stage = {"analysis": "анализ", "verification": "сверка"}[call["stage"]]
         tokens = call.get("usage", {}).get("totalTokenCount", "нет данных")
@@ -51,8 +67,10 @@ def format_report(run, suffix):
         if f["counterexample"]:
             lines += ["Сценарий — " + display(f["counterexample"]), ""]
         if f.get("corroboration"):
-            lines += ["Правило и Gemini указали на одно изменение состояния. Основания объединены в этой карточке.", ""]
+            lines += ["Повторные обнаружения объединены. Источники: " + ", ".join(f["detectors"]) + ".", ""]
         lines.extend("> " + display(s["anchor"]) + " · " + display(s["quote"]) + "\n" for s in f["source_refs"])
+        for k in f.get("context_refs", []):
+            lines += [f"Контекст раздела · {display(k)} · {display(run['sources'][k])}", ""]
     if "set_criteria" in run:
         lines += ["## Критерии качества набора", "",
                   f"Профиль {display(run['criteria_profile'])}. FAIL — воспроизведённый дефект, "
@@ -104,9 +122,10 @@ def format_comparison(run, suffix):
                 lines += [f"> **{label} · {display(s['anchor'])}** {display(s['quote'])}", ""]
         if e.get("proof", {}).get("kind") == "feasible_interval":
             p = e["proof"]
-            sample = f"{p['witness']:,}".replace(",", " ") + " " + display(p["unit"])
-            if p["unit"] == "секунд" and p["witness"] > 0 and p["witness"] % 3600 == 0:
-                sample = f"{p['witness'] // 3600} ч ({sample})"
+            witness = Decimal(str(p["witness"]))
+            sample = f"{witness:,f}".replace(",", " ") + " " + display(p["unit"])
+            if p["unit"] == "секунд" and 0 < witness < 10**27 and witness % 3600 == 0:
+                sample = f"{witness // 3600} ч ({sample})"
             lines += [f"**Проверочное значение для QA — {sample}.** "
                       f"Оно входит в новый интервал [{p['after_min']}, {p['after_max']}].", ""]
         if e.get("proof", {}).get("kind") == "calendar_alignment":

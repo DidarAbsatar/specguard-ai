@@ -2,11 +2,12 @@
 import re
 from calendar import monthrange
 from collections import defaultdict
+from decimal import Decimal, localcontext
 from itertools import combinations
 from typing import NamedTuple
 
 IDENT = re.compile(r"^(?:[-*\s]|\*\*)*([A-ZА-ЯЁ]{1,12}-\d+)\b[.:]?\**\s*", re.I)
-BOUND = re.compile(r"^(.+?)\s+(?:долж(?:ен|на|но|ны)\s+(?:быть|составлять)\s+)?(не менее|не более|минимум|максимум)\s+(\d+)\s+([а-яёa-z%₸]+)[.!]?$", re.I)
+BOUND = re.compile(r"^(.+?)\s+(?:долж(?:ен|на|но|ны)\s+(?:быть|составлять)\s+)?(не менее|не более|минимум|максимум)\s+([+-]?\d{1,128}(?:[.,]\d{1,128})?)\s+([а-яёa-z%₸]+)[.!]?$", re.I)
 NORM = re.compile(r"долж|обязан|запрещ|необходим|разреш|требуется|shall|must", re.I)
 TIME_SCALE = {word: seconds for seconds, forms in (
     (1, "с секунд секунда секунды секунду"),
@@ -17,6 +18,9 @@ TIME_SCALE = {word: seconds for seconds, forms in (
 HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
 CONTRACT_FIELD = re.compile(r"^\|\s*[*`]*(?:authorization|авторизация|http method|rest type|content-type|request url)[*`]*\s*\|", re.I)
 VAGUE = re.compile(r"\b(?:быстро|удобно|своевременно|оперативно)\b", re.I)
+DEFERRED = re.compile(r"(?:заполняется|заполняются|будет заполнен[ао]?|будут заполнены)\s+"
+                      r"(?:позже|позднее|отдельно|аналитик(?:ом|ами)|тестировщик(?:ом|ами)|"
+                      r"разработчик(?:ом|ами)|владельц(?:ем|ами))[.]?", re.I)
 PENDING = "Смысл и полнота требуют ревью."
 MONTHS = ("январ", "феврал", "март", "апрел", "ма[йяе]", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр")
 
@@ -25,7 +29,12 @@ class Bound(NamedTuple):
     subject: str
     unit: str
     minimum: bool
-    value: int
+    value: Decimal
+
+
+def json_number(value):
+    """Keep exact decimal witnesses even for consumers without decimal JSON support."""
+    return int(value) if value == value.to_integral_value() else format(value, "f")
 
 
 def parse_bound(raw):
@@ -39,7 +48,10 @@ def parse_bound(raw):
         unit = "секунд"
     elif re.fullmatch(r"байт(?:а|ов|ы)?", unit):
         unit = "байт"
-    return Bound(subject.casefold(), unit, op.casefold() in {"не менее", "минимум"}, int(value) * (scale or 1))
+    with localcontext() as ctx:
+        ctx.prec = len(value) + 6
+        converted = Decimal(value.replace(",", ".")) * (scale or 1)
+    return Bound(subject.casefold(), unit, op.casefold() in {"не менее", "минимум"}, converted)
 
 
 def calendar_checks(blocks, paths):
@@ -117,7 +129,7 @@ def inventory(blocks, paths=None, model_refs=()):
         if re.search("ревью требований|согласующих|общие сведения", section, re.I):
             continue
         normative = re.search("требования|правила|логика работы|параметры запроса|query-параметры|ответ|статусы|приемки", section, re.I)
-        if not (ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text)
+        if not (ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or DEFERRED.fullmatch(text)
                 or BOUND.match(text) or ref in model_refs):
             continue
         if text.startswith(("```", "{")) or text.lower() in ("или", "да / нет"):
@@ -182,9 +194,21 @@ def analyze(blocks, rows, complete):
     for ref in paths:
         raw = blocks[ref]
         text = IDENT.sub("", raw).strip()
+        section = paths[ref][-1][1] if paths[ref] else ""
         if re.search(r"\b(TBD|TBS|TBR)\b", text):
             add("placeholder", "MEDIUM", [ref], "Присутствует маркер открытого решения.",
                 "Ожидаемый результат требует уточнения.", "Заполнить значение или объяснить маркер.")
+        elif section and DEFERRED.fullmatch(text):
+            add("placeholder", "MEDIUM", [ref], f"В разделе «{section}» указано лишь будущее заполнение.",
+                f"Содержание раздела «{section}» нельзя использовать при согласовании текущей версии.",
+                f"Что должно появиться в разделе «{section}» до передачи документа? Если раздел неприменим, укажите основание.")
+        elif CONTRACT_FIELD.match(raw):
+            missing = re.findall(r"(?<!\w)([\w-]+):\s*[—–-](?=\s*(?:[|.;]|$))", raw)
+            if missing:
+                labels = ", ".join(missing)
+                add("placeholder", "MEDIUM", [ref], f"В параметре контракта отсутствует значение для «{labels}».",
+                    f"Для «{labels}» исполнитель не может проверить конфигурацию по документу.",
+                    f"Какое значение применимо для «{labels}» или где находится его согласованный источник?")
         bound = parse_bound(raw)
         if bound:
             bounds.setdefault((paths[ref], bound.subject, bound.unit), []).append((bound.minimum, bound.value, ref))
@@ -196,7 +220,7 @@ def analyze(blocks, rows, complete):
                     "Нельзя выбрать значение, удовлетворяющее обоим условиям.", "Согласовать область действия и диапазон.",
                     f"{subject} = {upper[1]} {unit} нарушает минимум {lower[1]}. Любое большее значение нарушает максимум.", True)
                 finding["proof"] = dict(kind="empty_interval", subject=subject, unit=unit,
-                                        minimum=lower[1], maximum=upper[1])
+                                        minimum=json_number(lower[1]), maximum=json_number(upper[1]))
     # A contract can have multiple endpoints. Limit matching to the same API section.
     method = None
     for ref, raw in blocks.items():
@@ -223,7 +247,7 @@ def analyze(blocks, rows, complete):
             add("calendar", "HIGH", [check["rule"], check["example"]],
                 "Ожидаемый месяц счётчика в примере расходится с месяцем события, указанного в правиле.",
                 "QA и разработчик получат разные ожидаемые суммы за один период.",
-                "Согласовать дату учёта и исправить правило или критерий приёмки.",
+                "Какую дату должен использовать расчёт на границе периодов? Зафиксировать ответ в правиле и примере приёмки.",
                 " → ".join(c.strip() for c in blocks[check["example"]].strip("|").split("|")))
     # Join a periodic upper bound to an independent trigger for the same effect.
     caps = []
@@ -260,6 +284,11 @@ def analyze(blocks, rows, complete):
                             re.search(r"изменени|сохран|запис|обнов|удал|мутаци|modif|mutat|writ|delet", claim))
         matches = [f for f in findings if f["category"] == "http" and "rule" in f["detectors"]
                    and set(f["core_refs"]) <= set(r["refs"])] if same_http_effect else []
+        if not matches:
+            matches = [f for f in findings if f["category"] == category
+                       and set(f["core_refs"]) == set(r["refs"]) and f["reason"].casefold() == claim
+                       and f["impact"] == r["impact"] and f["recommended_fix"] == r["action"]
+                       and f["counterexample"] == r["scenario"]]
         if len(matches) == 1:
             f = matches[0]
             f.setdefault("corroboration", []).append(dict(r))
@@ -268,17 +297,25 @@ def analyze(blocks, rows, complete):
             known = {s["anchor"] for s in f["source_refs"]}
             f["source_refs"].extend({"anchor": k, "quote": blocks[k]} for k in dict.fromkeys(r["refs"]) if k not in known)
             f["observed_text"] = " / ".join(s["quote"] for s in f["source_refs"])
+            f["context_refs"] = list(dict.fromkeys(f.get("context_refs", []) + r.get("context_refs", [])))
             continue
         severity = r.get("severity", "HIGH" if r["kind"] == "issue" else "MEDIUM")
         f = add(category, severity, r["refs"], r["summary"], r["impact"], r["action"], r["scenario"])
-        f.update(detectors=["gemini"], criterion=r.get("criterion"))
+        f.update(detectors=["gemini"], criterion=r.get("criterion"), context_refs=r.get("context_refs", []))
+        if re.fullmatch(r"(?:критическ|высок|низк|средн|значительн)\w*[.!]?", r["impact"].strip(), re.I):
+            f["impact"] = "Последствие по приведённым источникам не установлено. Требуется оценка владельца."
+            f["impact_status"] = "UNKNOWN"
     for n, r in enumerate(reqs, 1):
         r["id"] = f"R-{n:03}"
         r["findings"] = [f["id"] for f in findings if set(f["core_refs"]).intersection(r["refs"])]
         if r["findings"]:
             r["action"] = "Разобрать связанные замечания " + ", ".join(r["findings"]) + "."
         elif r["coverage"] == "pending":
-            r["action"] = "Сверить полную формулировку с владельцем: смысловая проверка фрагмента не подтверждена."
+            code = re.match(r"^\**([1-5]\d{2})[.\s*]+", r["summary"])
+            if code:
+                r["action"] = f"Для HTTP {code[1]} сверить условие возврата и пример тела ответа."
+            else:
+                r["action"] = f"Смысловая оценка не подтверждена. Какой наблюдаемый результат подтвердит условие {r['refs'][0]}?"
     blockers = [f for f in findings if f["severity"] == "BLOCKER"]
     mapped = {ref for r in reqs for ref in r["refs"]}
     # Unclassified prose may contain an implicit obligation. Leave it visible to reviewers.
@@ -288,10 +325,12 @@ def analyze(blocks, rows, complete):
     gate = "BLOCKED" if blockers else "REVIEW" if findings or not complete or not reqs or unclassified or pending or open_assessments else "READY"
     links = [{"from":r["id"], "to":k, "relation":"source"} for r in reqs for k in r["refs"]]
     links.extend({"from":r["id"], "to":f, "relation":"finding"} for r in reqs for f in r["findings"])
-    from assessment import assess, acceptance_links
+    from assessment import assess, acceptance_links, disposition
     links.extend(acceptance_links(reqs, blocks, paths))
     criteria = assess(reqs, findings, unclassified + [r["refs"][0] for r in pending])
+    outstanding = unclassified + [r["refs"][0] for r in reqs if r["coverage"] == "pending" or r["id"] in open_assessments]
     return dict(requirements=reqs, findings=findings, gate=gate, links=links, calendar_checks=calendar,
+                decision=disposition(gate, findings, outstanding),
                 candidate_count=candidate_count, pending_requirements=[r["id"] for r in pending],
                 open_assessments=open_assessments,
                 set_criteria=criteria, criteria_profile="29148:2018 / SpecGuard 1",

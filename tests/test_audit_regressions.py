@@ -113,7 +113,9 @@ class AuditRegressions(unittest.TestCase):
         self.assertEqual((metrics["documents"], metrics["true_positive"], metrics["false_positive"],
                           metrics["false_negative"]), (8, 3, 0, 0))
 
-    def test_package_matches_input_and_preserves_previous_zip_on_failure(self):
+    @patch("specguard.revision", return_value="a"*40)
+    @patch("package_submission.revision", return_value="a"*40)
+    def test_package_matches_input_and_preserves_previous_zip_on_failure(self, _checkout, _engine):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
             doc, review, target = folder/"in.md", folder/"out.json", folder/"submission.zip"
@@ -126,6 +128,9 @@ class AuditRegressions(unittest.TestCase):
                 self.assertEqual(set(archive.namelist()), {"review.json", "requirements.md", "review.html", "specguard-source.zip"})
                 self.assertEqual(archive.read("requirements.md"), doc.read_bytes())
             good = target.read_bytes()
+            with patch("package_submission.revision", return_value="b"*40), self.assertRaisesRegex(ValueError, "Git SHA"):
+                build_package(doc, review, target)
+            self.assertEqual(target.read_bytes(), good)
             doc.write_text("Другой текст.", encoding="utf8")
             with self.assertRaisesRegex(ValueError, "Вход"):
                 build_package(doc, review, target)

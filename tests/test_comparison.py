@@ -154,7 +154,9 @@ class CallMetadataTests(unittest.TestCase):
         self.assertEqual(calls[1]["status"], "error")
         self.assertNotIn("usage", calls[1])
 
-    def test_submission_preserves_completed_zip_when_next_cloud_run_fails(self):
+    @patch("specguard.revision", return_value="a"*40)
+    @patch("package_submission.revision", return_value="a"*40)
+    def test_submission_preserves_completed_zip_when_next_cloud_run_fails(self, _checkout, _engine):
         with tempfile.TemporaryDirectory() as folder:
             src, output = Path(folder)/"input.md", Path(folder)/"hand-in.zip"
             src.write_text("Сервис должен выдать квитанцию.", "utf8")
@@ -168,4 +170,4 @@ class CallMetadataTests(unittest.TestCase):
                 self.assertEqual(run_and_package(src, output), 2)
             self.assertEqual(output.read_bytes(), original)
             partial, = Path(folder).glob("hand-in-run-*.json")
-            self.assertIn("не завершён", json.loads(partial.read_text("utf8"))["manifest"]["Семантическая проверка"])
+            self.assertIn("не завершена", json.loads(partial.read_text("utf8"))["manifest"]["Семантическая проверка"])

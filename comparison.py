@@ -1,7 +1,7 @@
 """Compare two revisions with the same deterministic checks and source evidence."""
 from collections import defaultdict
 
-from quality import IDENT, analyze, parse_bound, section_paths
+from quality import IDENT, analyze, json_number, parse_bound, section_paths
 
 
 class Revision:
@@ -89,7 +89,8 @@ def compare(before_blocks, after_blocks):
                 entry.update(status="FIX_CONFIRMED", proof={
                     "kind": "feasible_interval", "subject": lower.subject, "unit": lower.unit,
                     "before_min": proof["minimum"], "before_max": proof["maximum"],
-                    "after_min": lower.value, "after_max": upper.value, "witness": lower.value,
+                    "after_min": json_number(lower.value), "after_max": json_number(upper.value),
+                    "witness": json_number(lower.value),
                 })
                 entry["action"] = "Использовать значение из допустимого интервала при проверке этой пары требований."
         if f["category"] == "calendar":
