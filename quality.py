@@ -134,7 +134,7 @@ def inventory(blocks, paths=None, model_refs=()):
             continue
         if text.startswith(("```", "{")) or text.lower() in ("или", "да / нет"):
             continue
-        clean = text[ident.end():] if ident else re.sub(r"^\d+[.)]\s+", "", text)
+        clean = text[ident.end():] if ident else re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", text)
         sentences = [clean] if text.startswith("|") else re.split(r"(?<=[.!?;])\s+(?=[А-ЯЁA-Zа-яёa-z])", clean)
         for sentence in sentences:
             if not sentence.strip() or re.fullmatch(r"\d+[.)]", sentence):
@@ -263,12 +263,13 @@ def analyze(blocks, rows, complete):
     for bound, effect, period in caps:
         for repeat, action, history in triggers:
             if effect == action and bound != repeat and paths[bound][:1] == paths[repeat][:1]:
-                add("state", "HIGH", [bound, repeat],
+                finding = add("state", "HIGH", [bound, repeat],
                     f"Для «{effect}» заданы предел за период и триггер независимо от {history}.",
                     "Две реализации могут выбрать разные результаты при повторном срабатывании.",
                     "Какое правило имеет приоритет при совпадении условий?",
                     f"Допущение: оба правила применимы к одному объекту. Период: {period}. "
                     f"Первое событие уже вызвало {effect}. До конца периода вновь выполняется условие триггера.")
+                finding["effect"] = effect
     for r in reqs:
         if VAGUE.search(r["summary"]):
             add("verifiability", "MEDIUM", r["refs"], "Качественная характеристика требует критерия проверки.",
@@ -285,6 +286,22 @@ def analyze(blocks, rows, complete):
                             re.search(r"изменени|сохран|запис|обнов|удал|мутаци|modif|mutat|writ|delet", claim))
         matches = [f for f in findings if f["category"] == "http" and "rule" in f["detectors"]
                    and set(f["core_refs"]) <= set(r["refs"])] if same_http_effect else []
+        if not matches and category in {"calendar", "state"}:
+            signal = (claim + " " + r["action"]).casefold()
+            for f in findings:
+                if (f["category"] != category or "rule" not in f["detectors"]
+                        or not set(f["core_refs"]) <= set(r["refs"])):
+                    continue
+                if category == "calendar":
+                    equivalent = (re.search(r"месяц|период", signal)
+                                  and re.search(r"расходят|противореч|расхожд|несовмест|не совпад|вместо|"
+                                                r"(?:разн|друг)\w*\s+(?:месяц|период)", signal)
+                                  and re.search(r"пример|критери|при[её]мк|сценари", signal))
+                else:
+                    equivalent = (f["effect"] in signal and re.search(r"повтор|втор|снов|уже", signal)
+                                  and re.search(r"максим|огранич|лимит|один|одн[ауо]|не более", signal))
+                if equivalent:
+                    matches.append(f)
         if not matches:
             matches = [f for f in findings if f["category"] == category
                        and set(f["core_refs"]) == set(r["refs"]) and f["reason"].casefold() == claim

@@ -13,6 +13,29 @@ from specguard import semantic, verify_candidates
 
 
 class ReleaseReviewTests(unittest.TestCase):
+    def test_cross_detector_corroboration_preserves_distinct_questions(self):
+        src = {"r": "Месяц определяется по дате доставки.",
+               "e": "| Доставка 30 ноября | Учесть 1 декабря | Декабрьский счётчик увеличен |",
+               "c": "Сервис выдаёт максимум один талон за неделю.",
+               "t": "Регистрация вызывает талон независимо от истории клиента."}
+        def issue(category, refs, summary):
+            return dict(kind="issue", category=category, provider="codex", refs=refs, summary=summary,
+                        impact="У приёмщиков расходятся ожидания.", action="Какое правило действует?",
+                        scenario="Повторить при тех же условиях.")
+        rows = [issue("calendar", ["r", "e"], "Правило и критерий относят событие к разным месяцам."),
+                issue("state", ["c", "t"], "Недельный максимум и повторная регистрация допускают второй талон."),
+                issue("calendar", ["r", "e"], "В примере отсутствует часовой пояс даты доставки.")]
+        run = analyze(src, rows, True)
+        self.assertEqual(len(run["findings"]), 3)
+        self.assertEqual(run["candidate_count"], 5)
+        self.assertEqual([f["detectors"] for f in run["findings"]], [["rule", "codex"], ["rule", "codex"], ["codex"]])
+
+    def test_list_marker_does_not_hide_complete_coverage(self):
+        src = {"h": "# Правила", "a": "* Сервис должен выдать чек."}
+        row = dict(kind="requirement", refs=["a"], summary="Сервис должен выдать чек.", action="Назван результат.")
+        req, = analyze(src, [row], True)["requirements"]
+        self.assertEqual(req["coverage"], "reviewed")
+
     @patch.dict("os.environ", {"SPECGUARD_PROVIDER": "codex", "SPECGUARD_CODEX_MODEL": "test-model"})
     @patch("chatgpt_provider.generate")
     def test_codex_uses_shared_contract_and_records_actual_detector(self, remote):
