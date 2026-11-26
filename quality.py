@@ -5,6 +5,7 @@ from collections import defaultdict
 from decimal import Decimal, localcontext
 from itertools import combinations
 from typing import NamedTuple
+from review_tables import document_roles
 
 IDENT = re.compile(r"^(?:[-*\s]|\*\*)*([A-ZА-ЯЁ]{1,12}-\d+)\b[.:]?\**\s*", re.I)
 BOUND = re.compile(r"^(.+?)\s+(?:долж(?:ен|на|но|ны)\s+(?:быть|составлять)\s+)?(не менее|не более|минимум|максимум)\s+([+-]?\d{1,128}(?:[.,]\d{1,128})?)\s+([а-яёa-z%₸]+)[.!]?$", re.I)
@@ -110,7 +111,7 @@ def section_paths(blocks):
     return result
 
 
-def inventory(blocks, paths=None, model_refs=()):
+def inventory(blocks, paths=None, model_refs=(), excluded=()):
     paths = section_paths(blocks) if paths is None else paths
     table, reqs = False, []
     for ref, text in blocks.items():
@@ -122,11 +123,11 @@ def inventory(blocks, paths=None, model_refs=()):
         if text.startswith("|"):
             if not table:
                 table = True
-                if not CONTRACT_FIELD.match(text):
+                if not (CONTRACT_FIELD.match(text) or ref in model_refs or NORM.search(text)):
                     continue
         else:
             table = False
-        if re.search("ревью требований|согласующих|общие сведения", section, re.I):
+        if ref in excluded:
             continue
         normative = re.search("требования|правила|логика работы|параметры запроса|query-параметры|ответ|статусы|приемки", section, re.I)
         if not (ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or DEFERRED.fullmatch(text)
@@ -144,13 +145,13 @@ def inventory(blocks, paths=None, model_refs=()):
     return reqs
 
 
-def reconcile(blocks, paths, rows):
+def reconcile(blocks, paths, rows, excluded=()):
     """Keep each source clause until model excerpts account for its text."""
     by_ref = defaultdict(list)
     for row in rows:
         if row["kind"] == "requirement" and len(row["refs"]) == 1:
             by_ref[row["refs"][0]].append(row)
-    reqs = inventory(blocks, paths, by_ref)
+    reqs = inventory(blocks, paths, by_ref, excluded)
     for req in reqs:
         ref, = req["refs"]
         clause = req["summary"]
@@ -176,9 +177,12 @@ def reconcile(blocks, paths, rows):
     return reqs
 
 
-def analyze(blocks, rows, complete):
+def analyze(blocks, rows, complete, *, header_refs=()):
     paths = section_paths(blocks)
-    reqs = reconcile(blocks, paths, rows)
+    controls, document_gaps, headers = document_roles(blocks, paths, header_refs)
+    supporting = controls.keys() | document_gaps.keys() | headers
+    product_paths = {ref: path for ref, path in paths.items() if ref not in supporting}
+    reqs = reconcile(blocks, paths, rows, supporting)
     findings = []
 
     def add(category, severity, refs, reason, impact, fix, scenario=None, confirmed=False):
@@ -191,7 +195,7 @@ def analyze(blocks, rows, complete):
         return findings[-1]
 
     bounds = {}
-    for ref in paths:
+    for ref in product_paths:
         raw = blocks[ref]
         text = IDENT.sub("", raw).strip()
         section = paths[ref][-1][1] if paths[ref] else ""
@@ -224,7 +228,7 @@ def analyze(blocks, rows, complete):
     # A contract can have multiple endpoints. Limit matching to the same API section.
     method = None
     for ref, raw in blocks.items():
-        if ref not in paths:
+        if ref not in product_paths:
             continue
         path = paths[ref]
         if method:
@@ -241,7 +245,7 @@ def analyze(blocks, rows, complete):
             add("http", "HIGH", [method[0], ref], "Контракт GET содержит операцию изменения состояния.",
                 "Клиент может повторить запрос как безопасное чтение.", "Согласовать метод и эффект повторного запроса.",
                 "Клиент повторяет тот же GET. Должно ли измениться сохранённое состояние?")
-    calendar = calendar_checks(blocks, paths)
+    calendar = calendar_checks(blocks, product_paths)
     for check in calendar:
         if check["expected_month"] != check["event_month"]:
             add("calendar", "HIGH", [check["rule"], check["example"]],
@@ -252,7 +256,7 @@ def analyze(blocks, rows, complete):
     # Join a periodic upper bound to an independent trigger for the same effect.
     caps = []
     triggers = []
-    for ref in paths:
+    for ref in product_paths:
         raw = blocks[ref]
         limit = re.search(r"(?:максимум|не более)\s+(?:один|одна|одно|1)\s+(?:тако[йея]\s+)?([\w-]+)\s+(?:за|в)\s+([^.;]+)", raw, re.I)
         trigger = re.search(r"(?:вызывает|инициирует)\s+([\w-]+)\s+независимо от\s+([^.;]+)", raw, re.I)
@@ -342,19 +346,22 @@ def analyze(blocks, rows, complete):
     blockers = [f for f in findings if f["severity"] == "BLOCKER"]
     mapped = {ref for r in reqs for ref in r["refs"]}
     # Unclassified prose may contain an implicit obligation. Leave it visible to reviewers.
-    unclassified = [ref for ref in paths if ref not in mapped]
+    unclassified = [ref for ref in paths if ref not in mapped and ref not in supporting]
+    open_controls = [ref for ref, item in controls.items() if item["state"] not in {"DECLARED", "NOT_APPLICABLE"}]
+    evidence_needed = open_controls + list(document_gaps)
     pending = [r for r in reqs if r["coverage"] == "pending"]
     open_assessments = [r["id"] for r in reqs if any(a["assessment"] != "grounded" for a in r["model_assessments"])]
-    gate = "BLOCKED" if blockers else "REVIEW" if findings or not complete or not reqs or unclassified or pending or open_assessments else "READY"
+    gate = "BLOCKED" if blockers else "REVIEW" if findings or not complete or not reqs or unclassified or pending or open_assessments or evidence_needed else "READY"
     links = [{"from":r["id"], "to":k, "relation":"source"} for r in reqs for k in r["refs"]]
     links.extend({"from":r["id"], "to":f, "relation":"finding"} for r in reqs for f in r["findings"])
     from assessment import assess, acceptance_links, disposition
     links.extend(acceptance_links(reqs, blocks, paths))
-    criteria = assess(reqs, findings, unclassified + [r["refs"][0] for r in pending])
-    outstanding = unclassified + [r["refs"][0] for r in reqs if r["coverage"] == "pending" or r["id"] in open_assessments]
+    criteria = assess(reqs, findings, unclassified + evidence_needed + [r["refs"][0] for r in pending])
+    outstanding = unclassified + evidence_needed + [r["refs"][0] for r in reqs if r["coverage"] == "pending" or r["id"] in open_assessments]
     return dict(requirements=reqs, findings=findings, gate=gate, links=links, calendar_checks=calendar,
                 decision=disposition(gate, findings, outstanding),
                 candidate_count=candidate_count, pending_requirements=[r["id"] for r in pending],
                 open_assessments=open_assessments,
                 set_criteria=criteria, criteria_profile="29148:2018 / SpecGuard 1",
-                unclassified_refs=unclassified)
+                review_controls=list(controls.values()), document_gaps=document_gaps,
+                table_headers=[ref for ref in paths if ref in headers], unclassified_refs=unclassified)

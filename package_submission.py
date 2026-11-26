@@ -12,7 +12,9 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from reporting import format_report
 from provenance import revision
-from specguard import ENGINE, VERSION, build_id, extract, main as validate_cli, provider_name
+from quality import section_paths
+from review_tables import document_roles
+from specguard import ENGINE, VERSION, build_id, main as validate_cli, provider_name, read_document
 
 ROOT = Path(__file__).resolve().parent
 
@@ -27,8 +29,14 @@ def build_package(document, report_path, output):
             or manifest["Сверка цитат"] not in {"выполнена", "нет кандидатов"}):
         raise ValueError("Для сдачи необходим завершённый прогон с --allow-cloud --verify.")
     document_bytes = document.read_bytes()
-    if hashlib.sha256(document_bytes).hexdigest() != manifest["SHA-256"] or extract(document) != run["sources"]:
+    headers = set()
+    blocks, source_hash = read_document(document, header_refs=headers)
+    if hashlib.sha256(document_bytes).hexdigest() != manifest["SHA-256"] or source_hash != manifest["SHA-256"] or blocks != run["sources"]:
         raise ValueError("Вход отличается от документа в отчёте.")
+    controls, gaps, header_refs = document_roles(blocks, section_paths(blocks), headers)
+    if (list(controls.values()) != run.get("review_controls") or gaps != run.get("document_gaps")
+            or [ref for ref in blocks if ref in header_refs] != run.get("table_headers")):
+        raise ValueError("Карта проверок документа расходится с исходными строками.")
     for finding in run["findings"]:
         if not finding["source_refs"] or any(run["sources"].get(s["anchor"]) != s["quote"] for s in finding["source_refs"]):
             raise ValueError("Цитата замечания расходится с исходником.")

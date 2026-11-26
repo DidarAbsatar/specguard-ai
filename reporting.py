@@ -34,6 +34,12 @@ def format_report(run, suffix):
                   f"Открытых оценок модели по требованиям — **{len(run.get('open_assessments', []))}**. "
                   f"До объединения было {run['candidate_count']} замечаний, "
                   f"после объединения — {len(findings)}.", ""]
+    if run.get("review_controls") or run.get("document_gaps"):
+        controls = run["review_controls"]
+        unmarked = sum(c["state"] == "UNMARKED" for c in controls)
+        lines += [f"Проверок готовности документа — **{len(controls)}**, из них без заполненных "
+                  f"или однозначно выбранных отметок — **{unmarked}**. "
+                  f"Открытых вопросов по реквизитам — **{len(run['document_gaps'])}**.", ""]
     by_id = {f["id"]: f for f in findings}
     ordered = ([by_id[i] for i in decision["order"]] if decision else
                sorted(findings, key=lambda f: (["BLOCKER","HIGH","MEDIUM","LOW"].index(f["severity"]),
@@ -96,6 +102,22 @@ def format_report(run, suffix):
     if "set_criteria" in run:
         lines += ["", "Индивидуальные свойства без доказательства имеют статус UNKNOWN. "
                   "MODEL_ASSESSED означает оценку модели по цитате. В JSON у каждого требования доступны все девять свойств, статус и основания.", ""]
+    if run.get("review_controls"):
+        lines += ["## Карта проверок готовности документа", "",
+                  "В таблице сохранены условия проверки и отметки из исходника. Выбранное «Да» означает заявление автора. "
+                  "Для подтверждения результата нужны доказательства выполнения.", "",
+                  "| ID | Источник | Критерий | Поля исходника | Итог по отметкам | Примечания и условия |",
+                  "|---|---|---|---|---|---|"]
+        labels = {"UNMARKED": "Отметка не выбрана", "NEGATIVE": "Указано «Нет»", "DECLARED": "Отметка автора",
+                  "NOT_APPLICABLE": "Указана неприменимость", "REVIEW": "Нужна интерпретация"}
+        for c in run["review_controls"]:
+            marks = " · ".join(display(v["column"]) + " — " + (display(v["text"]) or "пусто") for v in c["marks"])
+            notes = " · ".join(display(v["column"]) + " — " + display(v["text"]) for v in c["notes"])
+            lines.append(f"| {c['id']} | {c['ref']} | {display(c['criterion'])} | {marks} | {labels[c['state']]} | {notes or '—'} |")
+    if run.get("document_gaps"):
+        lines += ["", "## Открытые вопросы по реквизитам", ""]
+        for ref, question in run["document_gaps"].items():
+            lines += [f"- {ref} · {display(run['sources'][ref])} — {display(question)}"]
     pending = run.get("unclassified_refs", [])
     if pending:
         lines += ["", "## Строки вне карты требований", "",
