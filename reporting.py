@@ -56,7 +56,8 @@ def format_report(run, suffix):
         stage = {"analysis": "анализ", "verification": "сверка"}[call["stage"]]
         tokens = call.get("usage", {}).get("totalTokenCount", "нет данных")
         status = "получен JSON" if call["status"] == "received_json" else display(call.get("error", "ошибка"))
-        lines.append(f"- Запрос Gemini · {stage} · {status} · {call['elapsed_ms']} мс · токены по данным API — {tokens}.")
+        provider = call.get("provider", "gemini")
+        lines.append(f"- Запрос {display(provider)} · {stage} · {status} · {call['elapsed_ms']} мс · токены по данным провайдера — {tokens}.")
     if run.get("verification"):
         rejected = sum(r["kind"] == "rejected" for r in run["verification"])
         lines += [f"- Повторная сверка с цитатами — проверено {len(run['verification'])}, отклонено {rejected}."]
@@ -94,7 +95,7 @@ def format_report(run, suffix):
         lines.append(f"| {r['id']} | {display(r['source_id'])} | {quotes} | {display(r['summary'])} | {assessment} | {', '.join(r['findings']) or '—'} |")
     if "set_criteria" in run:
         lines += ["", "Индивидуальные свойства без доказательства имеют статус UNKNOWN. "
-                  "MODEL_ASSESSED означает оценку Gemini по цитате. В JSON у каждого требования доступны все девять свойств, статус и основания.", ""]
+                  "MODEL_ASSESSED означает оценку модели по цитате. В JSON у каждого требования доступны все девять свойств, статус и основания.", ""]
     pending = run.get("unclassified_refs", [])
     if pending:
         lines += ["", "## Строки вне карты требований", "",

@@ -5,7 +5,8 @@ import re
 import subprocess
 
 
-ENGINE = ("specguard.py", "quality.py", "assessment.py", "reporting.py", "comparison.py", "provenance.py")
+ENGINE = ("specguard.py", "quality.py", "assessment.py", "reporting.py", "comparison.py", "provenance.py",
+          "chatgpt_provider.py")
 
 
 def build_id(files=None):

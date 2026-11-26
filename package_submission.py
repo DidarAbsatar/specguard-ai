@@ -12,7 +12,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from reporting import format_report
 from provenance import revision
-from specguard import ENGINE, VERSION, build_id, extract, main as validate_cli
+from specguard import ENGINE, VERSION, build_id, extract, main as validate_cli, provider_name
 
 ROOT = Path(__file__).resolve().parent
 
@@ -88,7 +88,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("document", type=Path)
     parser.add_argument("report", type=Path, nargs="?", help="JSON завершённого прогона")
-    parser.add_argument("--allow-cloud", action="store_true", help="Отправить документ в Gemini и собрать ZIP")
+    parser.add_argument("--allow-cloud", action="store_true", help="Передать документ выбранной облачной модели и собрать ZIP")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.allow_cloud == bool(args.report):
@@ -96,7 +96,7 @@ def main(argv=None):
     try:
         if args.allow_cloud:
             os.environ.setdefault("GEMINI_MODEL", "gemini-3.5-flash")
-            if not os.environ.get("GEMINI_API_KEY") and sys.stdin.isatty():
+            if provider_name() == "gemini" and not os.environ.get("GEMINI_API_KEY") and sys.stdin.isatty():
                 os.environ["GEMINI_API_KEY"] = getpass.getpass("Ключ Gemini (ввод скрыт): ")
                 print("Ввод завершён. Дождитесь результата обращения к Gemini.", flush=True)
             code = run_and_package(args.document, args.output)

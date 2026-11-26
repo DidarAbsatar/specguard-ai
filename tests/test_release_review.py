@@ -5,13 +5,28 @@ import unittest
 from unittest.mock import patch
 
 from comparison import compare
+from chatgpt_provider import strict_schema
 from provenance import revision
 from quality import analyze
 from reporting import format_comparison, format_report
-from specguard import verify_candidates
+from specguard import semantic, verify_candidates
 
 
 class ReleaseReviewTests(unittest.TestCase):
+    @patch.dict("os.environ", {"SPECGUARD_PROVIDER": "codex", "SPECGUARD_CODEX_MODEL": "test-model"})
+    @patch("chatgpt_provider.generate")
+    def test_codex_uses_shared_contract_and_records_actual_detector(self, remote):
+        question = dict(kind="question", refs=["a"], summary="Не определено условие возврата.",
+                        impact="QA не может выбрать ответ.", action="Какое условие применимо?",
+                        scenario="Получена вторая заявка.", category="semantic", severity="MEDIUM",
+                        criterion="complete")
+        remote.return_value = {"requirements": [], "findings": [question]}
+        rows = semantic({"a": "Сервис должен вернуть ответ."})
+        self.assertEqual(remote.call_args.args[3:5], ("test-model", "analysis"))
+        schema = strict_schema(remote.call_args.args[2])
+        self.assertFalse(schema["properties"]["requirements"]["items"]["additionalProperties"])
+        self.assertEqual(analyze({"a": "Сервис должен вернуть ответ."}, rows, True)["findings"][0]["detectors"], ["codex"])
+
     def test_exact_fractional_conflict_and_compatible_revision(self):
         src = {"a": "Q-1. Задержка минимум 0,100000000000000001 секунд.",
                "b": "Q-2. Задержка максимум 0.1 секунд."}

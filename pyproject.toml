@@ -12,4 +12,4 @@ dependencies = ["pypdf==7.1.1", "markdown-it-py==3.0.0"]
 specguard = "specguard:main"
 
 [tool.setuptools]
-py-modules = ["specguard", "quality", "reporting", "assessment", "comparison", "provenance"]
+py-modules = ["specguard", "quality", "reporting", "assessment", "comparison", "provenance", "chatgpt_provider"]

@@ -277,6 +277,7 @@ def analyze(blocks, rows, complete):
     candidate_count = len(findings) + len(model_rows)
     for r in model_rows:
         category = r.get("category", "semantic")
+        detector = r.get("provider", "gemini")
         # One mutation through GET is one defect even if the model cites extra context.
         # Distinct failure modes on the same lines must remain separate.
         claim = r["summary"].casefold()
@@ -292,8 +293,8 @@ def analyze(blocks, rows, complete):
         if len(matches) == 1:
             f = matches[0]
             f.setdefault("corroboration", []).append(dict(r))
-            if "gemini" not in f["detectors"]:
-                f["detectors"].append("gemini")
+            if detector not in f["detectors"]:
+                f["detectors"].append(detector)
             known = {s["anchor"] for s in f["source_refs"]}
             f["source_refs"].extend({"anchor": k, "quote": blocks[k]} for k in dict.fromkeys(r["refs"]) if k not in known)
             f["observed_text"] = " / ".join(s["quote"] for s in f["source_refs"])
@@ -301,7 +302,7 @@ def analyze(blocks, rows, complete):
             continue
         severity = r.get("severity", "HIGH" if r["kind"] == "issue" else "MEDIUM")
         f = add(category, severity, r["refs"], r["summary"], r["impact"], r["action"], r["scenario"])
-        f.update(detectors=["gemini"], criterion=r.get("criterion"), context_refs=r.get("context_refs", []))
+        f.update(detectors=[detector], criterion=r.get("criterion"), context_refs=r.get("context_refs", []))
         if re.fullmatch(r"(?:критическ|высок|низк|средн|значительн)\w*[.!]?", r["impact"].strip(), re.I):
             f["impact"] = "Последствие по приведённым источникам не установлено. Требуется оценка владельца."
             f["impact_status"] = "UNKNOWN"
