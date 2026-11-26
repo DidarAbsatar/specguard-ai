@@ -93,8 +93,10 @@ def main(argv=None):
             os.environ.setdefault("GEMINI_MODEL", "gemini-3.5-flash")
             if not os.environ.get("GEMINI_API_KEY") and sys.stdin.isatty():
                 os.environ["GEMINI_API_KEY"] = getpass.getpass("Ключ Gemini (ввод скрыт): ")
+                print("Ввод завершён. Дождитесь результата обращения к Gemini.", flush=True)
             code = run_and_package(args.document, args.output)
             if code:
+                print("Запуск завершён. Для новой попытки запустите команду сборки ещё раз.", file=sys.stderr)
                 return code
         else:
             build_package(args.document, args.report, args.output)

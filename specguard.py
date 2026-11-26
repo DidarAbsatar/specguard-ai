@@ -86,8 +86,25 @@ def gemini_json(instruction, payload, schema, *, stage="analysis", calls=None):
     req = Request(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                   data=json.dumps(body).encode(), headers={"Content-Type": "application/json",
                                                            "x-goog-api-key": key})
+    try:
+        return request_json(req, model, stage, calls, attempt=1)
+    except HTTPError as exc:
+        hint = (exc.headers or {}).get("Retry-After")
+        exc.close()
+        if exc.code != 503:
+            raise
+        # Respect longer or date-based provider backoffs without blocking the CLI.
+        if hint is not None and (not re.fullmatch(r"[0-9]{1,2}", hint) or int(hint) > 15):
+            raise
+        delay = int(hint) if hint is not None else 2
+    logging.warning("Gemini HTTP 503. Через %s с будет одна повторная попытка.", delay)
+    time.sleep(delay)
+    return request_json(req, model, stage, calls, attempt=2)
+
+
+def request_json(req, model, stage, calls, attempt):
     started = time.monotonic()
-    event = {"stage": stage, "model": model, "request_bytes": len(req.data), "status": "error"}
+    event = {"stage": stage, "model": model, "attempt": attempt, "request_bytes": len(req.data), "status": "error"}
     try:
         with urlopen(req, timeout=60) as response:
             raw = response.read(4_000_001)

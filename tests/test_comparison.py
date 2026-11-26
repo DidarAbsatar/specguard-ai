@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 from zipfile import ZipFile
 
 from comparison import compare
@@ -106,6 +107,34 @@ class ComparisonTests(unittest.TestCase):
 
 
 class CallMetadataTests(unittest.TestCase):
+    @patch.dict("os.environ", {"GEMINI_MODEL": "test", "GEMINI_API_KEY": "test"})
+    @patch("specguard.time.sleep")
+    @patch("specguard.urlopen")
+    def test_one_retry_for_503_tracks_both_requests(self, remote, sleep):
+        from unittest.mock import MagicMock
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "[]"}]}}]}).encode()
+        remote.side_effect = [HTTPError("url", 503, "busy", {"Retry-After": "3"}, None), response]
+        calls = []
+        self.assertEqual(gemini_json("system", {}, {}, calls=calls), [])
+        self.assertEqual([(c["attempt"], c["status"]) for c in calls], [(1, "error"), (2, "received_json")])
+        sleep.assert_called_once_with(3)
+
+    @patch.dict("os.environ", {"GEMINI_MODEL": "test", "GEMINI_API_KEY": "test"})
+    @patch("specguard.time.sleep")
+    @patch("specguard.urlopen")
+    def test_persistent_503_is_bounded_and_auth_or_long_backoff_is_respected(self, remote, sleep):
+        for code, headers, attempts in [(503, {}, 2), (503, {"Retry-After": "90"}, 1), (403, {}, 1), (429, {}, 1)]:
+            with self.subTest(code=code, headers=headers):
+                remote.reset_mock()
+                sleep.reset_mock()
+                remote.side_effect = [HTTPError("url", code, "error", headers, None) for _ in range(attempts)]
+                with self.assertRaises(HTTPError):
+                    gemini_json("system", {}, {})
+                self.assertEqual(remote.call_count, attempts)
+                self.assertEqual(sleep.call_count, attempts - 1)
+
     @patch.dict("os.environ", {"GEMINI_MODEL": "test", "GEMINI_API_KEY": "sensitive-test-value"})
     @patch("specguard.urlopen")
     def test_only_provider_counts_are_logged_without_document_or_credentials(self, remote):
