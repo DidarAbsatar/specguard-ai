@@ -286,6 +286,11 @@ def analyze(blocks, rows, complete):
                             re.search(r"изменени|сохран|запис|обнов|удал|мутаци|modif|mutat|writ|delet", claim))
         matches = [f for f in findings if f["category"] == "http" and "rule" in f["detectors"]
                    and set(f["core_refs"]) <= set(r["refs"])] if same_http_effect else []
+        if r.get("rule_match"):
+            signature = r["rule_match"]
+            matches = [f for f in findings if "rule" in f["detectors"] and f["category"] == category
+                       and all(signature.get(k) == f[k] for k in ("category", "core_refs", "reason"))
+                       and set(f["core_refs"]) <= set(r["refs"])]
         if not matches and category in {"calendar", "state"}:
             signal = (claim + " " + r["action"]).casefold()
             for f in findings:
@@ -294,7 +299,7 @@ def analyze(blocks, rows, complete):
                     continue
                 if category == "calendar":
                     equivalent = (re.search(r"месяц|период", signal)
-                                  and re.search(r"расходят|противореч|расхожд|несовмест|не совпад|вместо|"
+                                  and re.search(r"расход[ия]|противореч|расхожд|несовмест|не совпад|вместо|"
                                                 r"(?:разн|друг)\w*\s+(?:месяц|период)", signal)
                                   and re.search(r"пример|критери|при[её]мк|сценари", signal))
                 else:

@@ -36,6 +36,19 @@ class ReleaseReviewTests(unittest.TestCase):
         req, = analyze(src, [row], True)["requirements"]
         self.assertEqual(req["coverage"], "reviewed")
 
+    def test_verified_rule_match_requires_the_same_evidence_and_defect_signature(self):
+        src = {"r": "Месяц определяется по дате доставки.",
+               "e": "| Доставка 30 ноября | Учесть 1 декабря | Декабрьский счётчик увеличен |"}
+        claim = dict(kind="issue", refs=["r", "e"], category="calendar", summary="Две разные даты учёта.",
+                     impact="Итог за ноябрь отличается.", action="Как учитывать доставку?", scenario="Смена периода.")
+        with patch("specguard.gemini_json", return_value=[dict(id=0, keep=True, reason="Совпадает выбор периода.",
+                                                                same_rule="F-001")]) as call:
+            rows = verify_candidates([claim], src)
+            self.assertIn("F-001", call.call_args.args[1][0]["related_rule_findings"])
+        self.assertEqual(len(analyze(src, rows, True)["findings"]), 1)
+        rows[0]["rule_match"]["reason"] = "Другое наблюдение"
+        self.assertEqual(len(analyze(src, rows, True)["findings"]), 2)
+
     @patch.dict("os.environ", {"SPECGUARD_PROVIDER": "codex", "SPECGUARD_CODEX_MODEL": "test-model"})
     @patch("chatgpt_provider.generate")
     def test_codex_uses_shared_contract_and_records_actual_detector(self, remote):
