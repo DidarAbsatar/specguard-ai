@@ -85,7 +85,8 @@ def format_report(run, suffix):
     lines += ["## Паспорт прогона", ""]
     lines.extend(f"- **{k}** — {display(v) if v is not None else 'не подтверждён'}" for k,v in run["manifest"].items())
     for call in run.get("llm_calls", []):
-        stage = {"analysis": "анализ", "verification": "сверка"}[call["stage"]]
+        stage = {"analysis": "анализ", "coverage": "оценка пропущенных формулировок",
+                 "verification": "сверка"}.get(call["stage"], display(call["stage"]))
         tokens = call.get("usage", {}).get("totalTokenCount", "нет данных")
         status = "получен JSON" if call["status"] == "received_json" else display(call.get("error", "ошибка"))
         provider = call.get("provider", "gemini")

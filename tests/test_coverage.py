@@ -35,6 +35,9 @@ class CoverageTests(unittest.TestCase):
         req = run["requirements"][0]
         self.assertEqual((run["pending_requirements"], req["criteria"]["verifiable"]["status"]), ([], "REVIEW"))
         self.assertEqual((req["questions"], run["findings"], run["gate"]), (["Q-001"], [], "REVIEW"))
+        from reporting import format_report
+        run.update(manifest={}, sources=source, llm_calls=[dict(stage="coverage", elapsed_ms=100, status="received_json")])
+        self.assertIn("оценка пропущенных формулировок", format_report(run, ".html"))
         with patch("specguard.structured_json") as ask:
             self.assertEqual(complete_assessments(source, completed, set(), []), completed)
             ask.assert_not_called()
