@@ -8,8 +8,30 @@ from assessment import INDIVIDUAL, SET
 
 def display(value):
     import html
-    escaped = html.escape(str(value)).replace("|", "&#124;").replace("\n", " ")
-    return re.sub(r"([\\`*_{}\[\]()#!~])", r"\\\1", escaped)
+    # Escape Markdown first, then HTML: escaping after html.escape broke entities
+    # such as &#124; into the literal text "&\#124;".
+    text = re.sub(r"([\\`*_{}\[\]()#!~])", r"\\\1", str(value).replace("\n", " "))
+    return html.escape(text, quote=False).replace("|", "\\|")
+
+
+def compact_refs(refs, limit=12):
+    """Collapse P<page>L<line> runs into ranges and cap the list for table cells."""
+    ids = [r for r in refs if not re.fullmatch(r"P\d+L\d+", r)]
+    anchors = sorted({r for r in refs if re.fullmatch(r"P\d+L\d+", r)},
+                     key=lambda r: tuple(map(int, re.findall(r"\d+", r))))
+    runs = []
+    for ref in anchors:
+        page, line = map(int, re.findall(r"\d+", ref))
+        if runs and runs[-1][0] == page and runs[-1][2] + 1 == line:
+            runs[-1][2] = line
+        else:
+            runs.append([page, line, line])
+    parts = [f"P{p}L{a}" if a == b else f"P{p}L{a}–L{b}" for p, a, b in runs]
+    hidden = len(parts) - limit
+    shown = ids + parts[:limit]
+    if hidden > 0:
+        shown.append(f"ещё {hidden} фрагм. (полный список в JSON)")
+    return ", ".join(shown)
 
 
 def format_report(run, suffix):
@@ -85,7 +107,7 @@ def format_report(run, suffix):
                   "| Критерий | Статус | Основания |", "|---|---|---|"]
         for key, result in run["set_criteria"].items():
             evidence = result["findings"] + result.get("pending_refs", [])
-            lines.append(f"| {SET[key]} | {result['status']} | {', '.join(evidence) or 'Нет подтверждённого основания'} |")
+            lines.append(f"| {SET[key]} | {result['status']} | {compact_refs(evidence) or 'Нет подтверждённого основания'} |")
         traces = [e for e in run["links"] if e["relation"] == "acceptance_reference"]
         if traces:
             lines += ["", "**Явные ссылки из критериев приёмки**", ""]
