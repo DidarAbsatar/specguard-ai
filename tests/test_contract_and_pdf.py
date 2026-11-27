@@ -64,6 +64,49 @@ CLEAN = """## Выписка API
 
 
 class ContractRuleTests(unittest.TestCase):
+    def test_documented_inline_status_preserves_preceding_conflict(self):
+        blocks = blocks_of('''### Ответы API пропусков
+#### 403 Forbidden
+Для аннулированного пропуска возвращается 404.
+**404**
+~~~json
+{"message":"Пропуск отсутствует"}
+~~~
+Для истёкшего пропуска возвращается 404.''')
+        findings = analyze(blocks, [], False)["findings"]
+        self.assertEqual([(f["reason"], f["core_refs"]) for f in findings], [
+            ("Раздел ответа 403 утверждает, что возвращается 404.", ["P1L2", "P1L3"])])
+        self.assertEqual([s["quote"] for s in findings[0]["source_refs"]],
+                         [blocks["P1L2"], blocks["P1L3"]])
+
+    def test_inline_codes_work_across_formats_and_status_families(self):
+        for label in ("**410**", "__410__", "410"):
+            with self.subTest(label=label):
+                blocks = blocks_of(f'''### Статусы
+Возможен ответ 410.
+#### 200 OK
+{label}
+```json
+{{"result":"error","note":"returns 409"}}
+```''')
+                self.assertEqual(contract_findings(blocks), [])
+
+    def test_empty_or_fenced_label_does_not_document_another_response(self):
+        blocks = blocks_of('''### Ответы
+Возможен ответ 410.
+#### 200 OK
+~~~~text
+#### 410 Gone
+**410**
+~~~~
+**410**
+#### 500 Internal Server Error
+При сбое возвращается 500.''')
+        findings = contract_findings(blocks)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("HTTP 410 упомянут", findings[0][2])
+        self.assertEqual(findings[0][1], ["P1L2"])
+
     def test_broken_contract(self):
         reasons = [f[2] for f in contract_findings(blocks_of(BROKEN))]
         joined = "\n".join(reasons)

@@ -9,6 +9,8 @@ import re
 HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
 STATUS_HEADING = re.compile(r"^#{1,6}\s+\**\s*([1-5]\d\d)\b")
 STATUS_LINE = re.compile(r"^[-*\s]*\**\s*([1-5]\d\d)[.:)]\**\s+\S")
+STATUS_LABEL = re.compile(r"(?:(\*\*|__)([1-5]\d\d)[.:]?\1|([1-5]\d\d))[.:]?")
+RESPONSE_SECTION = re.compile(r"\b(?:ответ(?:ы|а|ов)?|статус(?:ы|а|ов)?|responses?|status(?:es)?)\b", re.I)
 CODE = re.compile(r"(?<![\d.,])([1-5]\d\d)(?!\d|[.,]\d|\s*(?:бит|bit|мс|ms|₸|тенге|руб|%))")
 STATUS_CONTEXT = re.compile(r"возвращ|результат|статус|код|ответ|status|return|respon", re.I)
 RETURNS = re.compile(r"возвращает(?:ся|е)?\s+(?:код\s+|статус\s+)?([1-5]\d\d)\b|returns?\s+([1-5]\d\d)\b", re.I)
@@ -40,13 +42,18 @@ def contract_findings(blocks):
     headings = {}            # ref -> heading text
     status_scope = {}        # ref -> (code, heading ref) for lines under a status heading
     section_of = {}          # ref -> nearest heading ref
-    fence = False
+    described = {}
+    fence = None
     code_lines = set()
     current_heading, current_status = None, None
     for ref in refs:
         raw = blocks[ref]
-        if re.match(r"^(`{3,}|~{3,})", raw):
-            fence = not fence
+        marker = re.match(r"^(`{3,}|~{3,})", raw)
+        if fence and raw.startswith(fence) and not raw.strip(fence[0]).strip():
+            fence = None
+            continue
+        if not fence and marker:
+            fence = marker[1]
             continue
         heading = HEADING.match(raw)
         if heading and not fence:
@@ -54,19 +61,27 @@ def contract_findings(blocks):
             headings[ref] = heading[2]
             status = STATUS_HEADING.match(raw)
             current_status = (status[1], ref) if status else None
+            if current_status:
+                described.setdefault(*current_status)
             continue
         section_of[ref] = current_heading
-        if current_status:
-            status_scope[ref] = current_status
         if fence or raw.lstrip().startswith(("{", "[")):
             code_lines.add(ref)
-
-    described = {}
-    for ref in refs:
-        raw = blocks[ref]
-        match = STATUS_HEADING.match(raw) or (ref not in code_lines and STATUS_LINE.match(raw))
-        if match:
-            described.setdefault(match[1], ref)
+        else:
+            declaration = STATUS_LINE.match(raw)
+            label = STATUS_LABEL.fullmatch(raw.strip())
+            if declaration:
+                current_status = (declaration[1], ref)
+                described.setdefault(*current_status)
+            elif label and (current_status or RESPONSE_SECTION.search(headings.get(current_heading, ""))):
+                # The previous sentence still belongs to the preceding status.
+                # A bare label acquires a description only when content follows it.
+                current_status = (label[2] or label[3], ref)
+                continue
+        if current_status:
+            status_scope[ref] = current_status
+            if raw.strip() and not _is_separator(raw):
+                described.setdefault(*current_status)
     if not described:
         return found
 
@@ -83,13 +98,15 @@ def contract_findings(blocks):
     for code, ref in mentioned.items():
         if code not in described:
             found.append(("MEDIUM", [ref],
-                f"HTTP {code} упомянут в тексте, но для него нет описания условия и примера ответа.",
+                f"HTTP {code} упомянут в тексте. Не удалось сопоставить его с отдельным описанием ответа.",
                 f"Клиент и сервер по-разному обработают ответ {code}.",
                 f"Описать условие возврата {code} и тело ответа либо убрать упоминание.",
                 None))
 
     # 2. Inside a section for one status the text says another status is returned.
     for ref, (code, heading_ref) in status_scope.items():
+        if ref in code_lines:
+            continue
         match = RETURNS.search(blocks[ref])
         if match:
             other = match[1] or match[2]

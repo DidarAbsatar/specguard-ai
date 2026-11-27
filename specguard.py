@@ -18,7 +18,7 @@ from assessment import INDIVIDUAL, SET
 from provenance import ENGINE, build_id, revision
 from review_tables import cells
 
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 CATEGORIES = ["bounds", "calendar", "state", "http", "placeholder", "verifiability", "semantic"]
 
 
