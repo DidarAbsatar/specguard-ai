@@ -180,7 +180,8 @@ def inventory(blocks, paths=None, model_refs=(), excluded=(), *, context=None, b
                                           or PRODUCT_CLAUSE.search(s) or any(q in s for q in claims)))]
         if context is not None:
             context.extend(dict(ref=ref, text=s) for s in scope)
-        if not (scope or described or ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or DEFERRED.fullmatch(text)
+        protected = any(PRODUCT_CLAUSE.search(s) for s in described)
+        if not (scope or protected or ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or DEFERRED.fullmatch(text)
                 or BOUND.match(text) or ref in model_refs):
             continue
         for sentence in sentences:
@@ -232,10 +233,16 @@ def reconcile(blocks, paths, rows, excluded=(), *, context=None, unresolved=None
 
 def analyze(blocks, rows, complete, *, header_refs=()):
     paths = section_paths(blocks)
-    controls, document_gaps, headers = document_roles(blocks, paths, header_refs)
-    supporting = controls.keys() | document_gaps.keys() | headers
+    contributors = {}
+    controls, document_gaps, headers = document_roles(blocks, paths, header_refs, contributors=contributors)
+    # A credit in a document passport is metadata. A duty or operating condition
+    # in its value still belongs in the product review.
+    credits = {ref for ref, value in contributors.items()
+               if not (NORM.search(value) or PRODUCT_CLAUSE.search(value) or EMBEDDED_RULE.search(value))}
+    supporting = controls.keys() | document_gaps.keys() | headers | credits
     product_paths = {ref: path for ref, path in paths.items() if ref not in supporting}
-    context, unresolved = [], []
+    context = [dict(ref=ref, text=blocks[ref]) for ref in blocks if ref in credits]
+    unresolved = []
     reqs = reconcile(blocks, paths, rows, supporting, context=context, unresolved=unresolved)
     findings = []
 

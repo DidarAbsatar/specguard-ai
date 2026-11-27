@@ -57,6 +57,17 @@ class ScopeAndQuestionTests(unittest.TestCase):
                 self.assertEqual(len(run["requirements"]), 1)
                 self.assertFalse(run["document_context"])
 
+    def test_contributor_credit_is_context_but_duty_and_missing_value_are_reviewed(self):
+        src = {"P1L1":"# Правила", "P1L2":"| Поле | Значение |",
+               "P1L4":"| Редактор / Автор | Отдел учёта |",
+               "P1L5":"| Владелец | Должен согласовать перевод. |",
+               "P1L6":"| Reviewer | — |"}
+        rows = [dict(kind="requirement", refs=["P1L4"], summary=src["P1L4"], action="Проверить.")]
+        run = analyze(src, rows, True)
+        self.assertEqual(run["document_context"], [dict(ref="P1L4", text=src["P1L4"])])
+        self.assertEqual([r["refs"] for r in run["requirements"]], [["P1L5"]])
+        self.assertIn("P1L6", run["document_gaps"])
+
     def test_scope_alone_does_not_make_a_document_ready(self):
         blocks = {"a":"Здесь рассматривается выпуск пропусков."}
         with patch("specguard.structured_json", return_value={"requirements": [], "findings": []}):
