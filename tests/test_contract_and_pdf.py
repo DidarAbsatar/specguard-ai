@@ -107,3 +107,35 @@ class PdfLayoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnitRuleTests(unittest.TestCase):
+    def test_mixed_units_flagged(self):
+        from contract_rules import unit_findings
+        blocks = {"P1L1": "Хранить сумму начисления в копейках.", "P1L2": "Лимит списания задаётся в рублях."}
+        result = unit_findings(blocks)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][1], ["P1L1", "P1L2"])
+
+    def test_conversion_rule_suppresses(self):
+        from contract_rules import unit_findings
+        blocks = {"P1L1": "Хранить сумму в копейках.", "P1L2": "Лимит в рублях.",
+                  "P1L3": "Перед сравнением лимит переводится в копейки умножением на 100."}
+        self.assertEqual(unit_findings(blocks), [])
+
+    def test_single_unit_clean(self):
+        from contract_rules import unit_findings
+        self.assertEqual(unit_findings({"P1L1": "Лимит 500 ₸.", "P1L2": "Пересчёт расходов после возврата."}), [])
+
+
+class DisplayTests(unittest.TestCase):
+    def test_table_row_and_apostrophe_render_literally(self):
+        from markdown_it import MarkdownIt
+        from reporting import display, compact_refs
+        html = MarkdownIt().render("> " + display("| `amount` | integer | O'Brien & Co |"))
+        self.assertNotIn("#124", html)
+        self.assertNotIn("#x27", html)
+        self.assertIn("| ", html)
+        self.assertIn("O'Brien &amp; Co", html)
+        self.assertEqual(compact_refs(["F-1", "P1L3", "P1L4", "P1L5", "P2L1"]), "F-1, P1L3–L5, P2L1")
+        self.assertIn("ещё 1", compact_refs([f"P1L{n}" for n in range(1, 40, 2)], limit=19))

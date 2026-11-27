@@ -178,3 +178,41 @@ def contract_findings(blocks):
                     "Клиент и сервер по-разному сериализуют значения, проверка типов в тестах противоречива.",
                     "Зафиксировать один тип для каждого поля во всех таблицах.", None))
     return found
+
+
+# Currency families: minor unit pattern, major unit pattern, display names.
+CURRENCY_UNITS = [
+    (r"тиын\w*|tiyn\w*", r"тенге|₸|\bkzt\b", "тиын", "тенге"),
+    (r"копе[йе]к\w*|копейка", r"руб\w*|₽|\brub\b", "копейки", "рубли"),
+    (r"\bцент\w*|\bcents?\b", r"доллар\w*|\busd\b|\$|евро|\beur\b|€", "центы", "основные единицы"),
+]
+CONVERSION = re.compile(r"\d\s*(?:тенге|₸|руб\w*|₽|доллар\w*|\$)\s*=|=\s*100\s|"
+                        r"(?:пересч|конверт|перевод)\w*\W+(?:\w+\W+){0,3}(?:в|из)\s+(?:тиын|копе|цент|минимальн)|"
+                        r"делит\w* на 100|умнож\w* на 100", re.I)
+
+
+def unit_findings(blocks):
+    """Amounts of one currency described in both minor and major units without a conversion rule."""
+    found = []
+    text = [(ref, raw) for ref, raw in blocks.items() if not HEADING.match(raw)]
+    if any(CONVERSION.search(raw) for _, raw in text):
+        return found
+    for minor, major, minor_name, major_name in CURRENCY_UNITS:
+        minor_ref = next((ref for ref, raw in text if re.search(minor, raw, re.I)), None)
+        if not minor_ref:
+            continue
+        major_refs = [ref for ref, raw in text if re.search(major, raw, re.I)]
+        if not major_refs:
+            continue
+        if minor_ref in major_refs:
+            evidence = [minor_ref]          # one sentence mixes both units
+        else:
+            # Prefer a major-unit line that states a stored or transferred value over a UI label.
+            evidence = [minor_ref, next((r for r in major_refs if re.search(
+                r"порог|сумм|amount|лимит|limit|целое|integer", blocks[r], re.I)), major_refs[0])]
+        found.append(("MEDIUM", evidence,
+            f"Денежные суммы описаны в разных единицах ({minor_name} и {major_name}), правило пересчёта не указано.",
+            "Сравнение суммы с порогом может ошибиться в 100 раз; тест не знает, в каких единицах ожидать значения.",
+            f"Указать одну единицу хранения и сравнения либо явное правило пересчёта {minor_name} ↔ {major_name}.",
+            None))
+    return found

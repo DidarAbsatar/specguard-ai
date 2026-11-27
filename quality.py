@@ -248,6 +248,9 @@ def analyze(blocks, rows, complete, *, header_refs=()):
     from contract_rules import contract_findings
     for severity, refs, reason, impact, fix, scenario in contract_findings(blocks):
         add("http", severity, refs, reason, impact, fix, scenario)
+    from contract_rules import unit_findings
+    for severity, refs, reason, impact, fix, scenario in unit_findings(blocks):
+        add("bounds", severity, refs, reason, impact, fix, scenario)
     calendar = calendar_checks(blocks, product_paths)
     for check in calendar:
         if check["expected_month"] != check["event_month"]:
