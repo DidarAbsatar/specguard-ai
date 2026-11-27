@@ -18,7 +18,7 @@ from assessment import INDIVIDUAL, SET
 from provenance import ENGINE, build_id, revision
 from review_tables import cells
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 CATEGORIES = ["bounds", "calendar", "state", "http", "placeholder", "verifiability", "semantic"]
 
 
@@ -33,13 +33,30 @@ class PartialReview(ReviewError):
         super().__init__(f"отклонено записей: {len(rejected)}")
 
 
+def pdf_structure(data):
+    """Layout-aware PDF reading; None falls back to plain pypdf extraction."""
+    if os.environ.get("SPECGUARD_PDF_MODE", "layout").lower() == "plain":
+        return None
+    try:
+        from pdf_layout import pdf_pages
+        pages = pdf_pages(data)
+    except Exception:
+        return None
+    if not pages or any(not page.strip() for page in pages):
+        return None
+    return pages
+
+
 def read_document(path, *, header_refs=None):
     with path.open("rb") as stream:
         data = stream.read(12_000_001)
     if len(data) > 12_000_000:
         raise ValueError("Файл превышает лимит 12 МБ")
     suffix = path.suffix.lower()
-    if suffix == ".pdf":
+    structured = pdf_structure(data) if suffix == ".pdf" else None
+    if structured is not None:
+        pages = structured
+    elif suffix == ".pdf":
         from pypdf import PdfReader
         pages = []
         for number, page in enumerate(PdfReader(io.BytesIO(data)).pages, 1):

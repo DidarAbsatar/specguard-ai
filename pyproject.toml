@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "specguard-ai"
-version = "0.6.1"
+version = "0.6.2"
 requires-python = ">=3.11"
-dependencies = ["pypdf==7.1.1", "markdown-it-py==3.0.0"]
+dependencies = ["pypdf==7.1.1", "pdfplumber==0.11.11", "markdown-it-py==3.0.0"]
 
 [project.scripts]
 specguard = "specguard:main"
 
 [tool.setuptools]
-py-modules = ["specguard", "quality", "reporting", "assessment", "comparison", "provenance", "chatgpt_provider", "review_tables"]
+py-modules = ["specguard", "quality", "reporting", "assessment", "comparison", "provenance", "chatgpt_provider", "review_tables", "pdf_layout", "contract_rules"]

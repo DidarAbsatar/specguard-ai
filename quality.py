@@ -245,6 +245,9 @@ def analyze(blocks, rows, complete, *, header_refs=()):
             add("http", "HIGH", [method[0], ref], "Контракт GET содержит операцию изменения состояния.",
                 "Клиент может повторить запрос как безопасное чтение.", "Согласовать метод и эффект повторного запроса.",
                 "Клиент повторяет тот же GET. Должно ли измениться сохранённое состояние?")
+    from contract_rules import contract_findings
+    for severity, refs, reason, impact, fix, scenario in contract_findings(blocks):
+        add("http", severity, refs, reason, impact, fix, scenario)
     calendar = calendar_checks(blocks, product_paths)
     for check in calendar:
         if check["expected_month"] != check["event_month"]:
