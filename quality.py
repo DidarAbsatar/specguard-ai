@@ -181,7 +181,9 @@ def inventory(blocks, paths=None, model_refs=(), excluded=(), *, context=None, b
         if context is not None:
             context.extend(dict(ref=ref, text=s) for s in scope)
         protected = any(PRODUCT_CLAUSE.search(s) for s in described)
-        if not (scope or protected or ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or DEFERRED.fullmatch(text)
+        goal = re.fullmatch(r"(?:бизнес[- ]?)?цел[ьи](?: проекта| продукта)?|(?:business )?goals?", section, re.I)
+        goal_behavior = goal and any(PRODUCT_CLAUSE.search(s) for s in sentences)
+        if not (scope or protected or goal_behavior or ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or DEFERRED.fullmatch(text)
                 or BOUND.match(text) or ref in model_refs):
             continue
         for sentence in sentences:

@@ -8,7 +8,7 @@ from pypdf import PdfWriter
 from pypdf.generic import NameObject, DictionaryObject, DecodedStreamObject
 
 from quality import analyze
-from specguard import extract, main
+from specguard import PartialReview, complete_assessments, extract, main
 
 
 def analyze_lines(*lines):
@@ -19,6 +19,36 @@ def analyze_lines(*lines):
 
 
 class CoverageTests(unittest.TestCase):
+    def test_question_about_goal_does_not_replace_its_assessment(self):
+        goal = "Дать пассажиру возможность узнать об отмене до отправления."
+        source = {"h": "## Бизнес-цели", "a": goal, "b": "Оператор должен зарегистрировать отмену."}
+        rows = [dict(kind="requirement", refs=["b"], summary=source["b"], action="Указано действие."),
+                dict(kind="question", refs=["a", "b"], summary="Срок регистрации и срок оповещения различаются.",
+                     impact="Пассажир может опоздать.", action="Когда уведомляют пассажира?")]
+        self.assertEqual(analyze(source, rows, True)["pending_requirements"], ["R-001"])
+        reply = dict(id="R-001", criterion="verifiable", assessment="review", action="Как зафиксировать момент оповещения?")
+        with patch("specguard.structured_json", return_value=[reply]) as ask:
+            completed = complete_assessments(source, rows, set(), [])
+        target, = ask.call_args.args[1]
+        self.assertEqual((target["quote"], target["related_sources"]), (goal, {"b": source["b"]}))
+        run = analyze(source, completed, True)
+        req = run["requirements"][0]
+        self.assertEqual((run["pending_requirements"], req["criteria"]["verifiable"]["status"]), ([], "REVIEW"))
+        self.assertEqual((req["questions"], run["findings"], run["gate"]), (["Q-001"], [], "REVIEW"))
+        with patch("specguard.structured_json") as ask:
+            self.assertEqual(complete_assessments(source, completed, set(), []), completed)
+            ask.assert_not_called()
+
+    def test_followup_cannot_cover_sibling_with_duplicate_or_missing_id(self):
+        source = {"h": "# Правила", "a": "Закрыть дверь. Сохранить отметку."}
+        answer = dict(id="R-001", criterion="correct", assessment="unknown", action="Основание не указано.")
+        with patch("specguard.structured_json", return_value=[answer, answer]), self.assertRaises(PartialReview) as caught:
+            complete_assessments(source, [], set(), [])
+        run = analyze(source, caught.exception.rows, False)
+        self.assertEqual(run["pending_requirements"], ["R-002"])
+        self.assertEqual(run["requirements"][0]["criteria"]["correct"]["status"], "UNKNOWN")
+        self.assertTrue(any("R-002" in reason for reason in caught.exception.rejected))
+
     @patch.dict("os.environ", {"GEMINI_MODEL": "test-gemini"})
     def test_cloud_candidates_use_same_gemini_verifier(self):
         with tempfile.TemporaryDirectory() as folder:

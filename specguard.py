@@ -18,7 +18,7 @@ from assessment import INDIVIDUAL, SET
 from provenance import ENGINE, build_id, revision
 from review_tables import cells
 
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 CATEGORIES = ["bounds", "calendar", "state", "http", "placeholder", "verifiability", "semantic"]
 
 
@@ -191,6 +191,7 @@ def semantic(blocks, calls=None):
         "В context верни дословно отдельные вводные предложения об области документа, роли участника и "
         "заданных начальных условиях сценария. Рассказ о действиях пользователя сам по себе не задаёт "
         "обязанность продукта. Сохраняй реальные обязательства и в вводных разделах, даже рядом с описанием области. "
+        "Цель с результатом для пользователя оцени отдельно, даже если по ней также задан вопрос. "
         "Определения и ограничения, задающие наблюдаемое поведение, включай в requirements. "
         "Список возможных отметок не означает, что проверка пройдена. "
         "Выдели каждое обязательство, включая правила таблиц, как requirement с одной ссылкой. "
@@ -248,6 +249,53 @@ def semantic(blocks, calls=None):
             return []
         raise ReviewError("модель вернула два пустых списка")
     return rows
+
+
+def complete_assessments(blocks, rows, headers, calls):
+    """Request one evidence-bound assessment for each still-uncovered source clause."""
+    from quality import analyze
+    inventory = analyze(blocks, rows, True, header_refs=headers)
+    targets = [r for r in inventory["requirements"] if r["coverage"] == "pending"]
+    if not targets:
+        return rows
+    payload = []
+    for req in targets:
+        ref, = req["refs"]
+        related = {k for row in rows if row["kind"] in {"issue", "question"} and ref in row["refs"]
+                   for k in row["refs"] if k != ref}
+        payload.append(dict(id=req["id"], section=req["section"], quote=req["summary"],
+                            source=blocks[ref], related_sources={k: blocks[k] for k in blocks if k in related}))
+    fields = {"id": {"type": "STRING"}, "criterion": {"type": "STRING", "enum": list(INDIVIDUAL)},
+              "assessment": {"type": "STRING", "enum": ["grounded", "review", "unknown"]},
+              "action": {"type": "STRING"}}
+    try:
+        result = structured_json("Оцени каждую переданную формулировку quote целиком по одному свойству ISO. "
+            "Верни один ответ с исходным id на каждую запись. На русском поясни оценку в action по цитате. "
+            "Для цели оцени проверяемость результата для пользователя. Различай действия системы и результат "
+            "для пользователя. Если нужен выбор владельца, используй review и задай конкретный вопрос. "
+            "Если данных недостаточно, используй unknown. Не выводи факты за пределами источников.",
+            payload, {"type": "ARRAY", "items": {"type": "OBJECT", "properties": fields, "required": list(fields)}},
+            stage="coverage", calls=calls)
+    except Exception as exc:
+        raise PartialReview(rows, ["оценка пропущенных формулировок · " + stage_error(exc)]) from exc
+    remaining = {r["id"]: r for r in targets}
+    completed = list(rows)
+    errors = []
+    if not isinstance(result, list):
+        raise PartialReview(rows, ["оценка формулировок: ожидался массив"])
+    for item in result:
+        if (not isinstance(item, dict) or set(item) != set(fields)
+                or not all(isinstance(item[k], str) and item[k].strip() for k in fields)
+                or item["id"] not in remaining or item["criterion"] not in INDIVIDUAL
+                or item["assessment"] not in fields["assessment"]["enum"]):
+            errors.append("некорректная или повторная оценка формулировки")
+            continue
+        req = remaining.pop(item["id"])
+        completed.append(dict(kind="requirement", refs=req["refs"], summary=req["summary"],
+                              criterion=item["criterion"], assessment=item["assessment"], action=item["action"]))
+    if errors or remaining:
+        raise PartialReview(completed, errors + [f"{k}: отсутствует оценка формулировки" for k in remaining])
+    return completed
 
 
 def row_error(row, fields, blocks):
@@ -397,6 +445,8 @@ def main(argv=None):
             try:
                 try:
                     rows = semantic(blocks, calls=calls)
+                    if rows:
+                        rows = complete_assessments(blocks, rows, header_refs, calls)
                 except PartialReview as partial:
                     rows, rejected_rows = partial.rows, partial.rejected
                 if args.verify:
