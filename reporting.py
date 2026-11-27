@@ -38,8 +38,12 @@ def format_report(run, suffix):
     if suffix == ".json":
         return json.dumps(run, ensure_ascii=False, indent=2)
     reqs, findings = run["requirements"], run["findings"]
+    questions = run.get("questions", [])
+    # Older runs used one combined collection without preserving every row's kind.
+    totals = (f"Дефектов: {len(findings)} · Вопросов владельцу: {len(questions)}"
+              if "questions" in run else f"Замечаний: {len(findings)}")
     lines = ["# SpecGuard AI · Ревью требований", "", "## Решение", "",
-             f"**{run['gate']}** · Требований: {len(reqs)} · Замечаний: {len(findings)} · "
+             f"**{run['gate']}** · Требований: {len(reqs)} · {totals} · "
              f"Блокирующих: {sum(f['severity']=='BLOCKER' for f in findings)}", ""]
     decision = run.get("decision", {})
     if decision:
@@ -54,7 +58,7 @@ def format_report(run, suffix):
         lines += [f"На ручную сверку формулировок — **{len(run['pending_requirements'])}**. "
                   f"Строк вне карты — **{len(run['unclassified_refs'])}**. "
                   f"Открытых оценок модели по требованиям — **{len(run.get('open_assessments', []))}**. "
-                  f"До объединения было {run['candidate_count']} замечаний, "
+                  f"До объединения — {run['candidate_count']} {'кандидатов в дефекты' if 'questions' in run else 'замечаний'}, "
                   f"после объединения — {len(findings)}.", ""]
     if run.get("review_controls") or run.get("document_gaps"):
         controls = run["review_controls"]
@@ -100,6 +104,12 @@ def format_report(run, suffix):
         lines.extend("> " + display(s["anchor"]) + " · " + display(s["quote"]) + "\n" for s in f["source_refs"])
         for k in f.get("context_refs", []):
             lines += [f"Контекст раздела · {display(k)} · {display(run['sources'][k])}", ""]
+    if questions:
+        lines += ["## Вопросы владельцу", ""]
+        for q in questions:
+            lines += [f"### {q['id']} · {display(q['question'])}", "", display(q["reason"]), "",
+                      f"Значение для решения — {display(q['impact'])}", ""]
+            lines.extend("> " + display(s["anchor"]) + " · " + display(s["quote"]) + "\n" for s in q["source_refs"])
     if "set_criteria" in run:
         lines += ["## Критерии качества набора", "",
                   f"Профиль {display(run['criteria_profile'])}. FAIL — воспроизведённый дефект, "
@@ -113,17 +123,21 @@ def format_report(run, suffix):
             lines += ["", "**Явные ссылки из критериев приёмки**", ""]
             lines.extend(f"- {e['from']} → {e['to']} · {display(run['sources'][e['to']])}" for e in traces)
     lines += ["", "## Карта и проверка каждого требования", "",
-              "| ID | ID источника | Цитата и координаты | Формулировка | Оценка | Замечания |",
+              "| ID | ID источника | Цитата и координаты | Формулировка | Оценка | Связанные карточки |",
               "|---|---|---|---|---|---|"]
     for r in reqs:
         quotes = " / ".join(k+" "+display(run["sources"][k]) for k in r["refs"])
         issues = [INDIVIDUAL[k] + " " + item["status"] for k, item in r.get("criteria", {}).items()
                   if item["status"] != "UNKNOWN"]
         assessment = " ".join([display(r["action"]), *issues])
-        lines.append(f"| {r['id']} | {display(r['source_id'])} | {quotes} | {display(r['summary'])} | {assessment} | {', '.join(r['findings']) or '—'} |")
+        cards = r["findings"] + r.get("questions", [])
+        lines.append(f"| {r['id']} | {display(r['source_id'])} | {quotes} | {display(r['summary'])} | {assessment} | {', '.join(cards) or '—'} |")
     if "set_criteria" in run:
         lines += ["", "Индивидуальные свойства без доказательства имеют статус UNKNOWN. "
                   "MODEL_ASSESSED означает оценку модели по цитате. В JSON у каждого требования доступны все девять свойств, статус и основания.", ""]
+    if run.get("document_context"):
+        lines += ["", "## Область документа", ""]
+        lines.extend(f"- {display(c['ref'])} · {display(c['text'])}" for c in run["document_context"])
     if run.get("review_controls"):
         lines += ["## Карта проверок готовности документа", "",
                   "В таблице сохранены условия проверки и отметки из исходника. Выбранное «Да» означает заявление автора. "

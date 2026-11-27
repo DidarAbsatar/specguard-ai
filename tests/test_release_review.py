@@ -61,7 +61,9 @@ class ReleaseReviewTests(unittest.TestCase):
         self.assertEqual(remote.call_args.args[3:5], ("test-model", "analysis"))
         schema = strict_schema(remote.call_args.args[2])
         self.assertFalse(schema["properties"]["requirements"]["items"]["additionalProperties"])
-        self.assertEqual(analyze({"a": "Сервис должен вернуть ответ."}, rows, True)["findings"][0]["detectors"], ["codex"])
+        run = analyze({"a": "Сервис должен вернуть ответ."}, rows, True)
+        self.assertEqual(run["findings"], [])
+        self.assertEqual(run["questions"][0]["detectors"], ["codex"])
 
     def test_exact_fractional_conflict_and_compatible_revision(self):
         src = {"a": "Q-1. Задержка минимум 0,100000000000000001 секунд.",

@@ -37,12 +37,12 @@ def build_package(document, report_path, output):
     if (list(controls.values()) != run.get("review_controls") or gaps != run.get("document_gaps")
             or [ref for ref in blocks if ref in header_refs] != run.get("table_headers")):
         raise ValueError("Карта проверок документа расходится с исходными строками.")
-    for finding in run["findings"]:
+    for finding in [*run["findings"], *run.get("questions", [])]:
         if not finding["source_refs"] or any(run["sources"].get(s["anchor"]) != s["quote"] for s in finding["source_refs"]):
             raise ValueError("Цитата замечания расходится с исходником.")
     names = [*ENGINE, "pyproject.toml", "setup.py", "package_submission.py", "benchmark.py", "README.md", "AGENTS.md",
              ".gitignore", ".gitattributes", ".env.example", ".github/workflows/tests.yml"]
-    for pattern in ("docs/*.md", "tests/test_*.py", "examples/retention/*.md"):
+    for pattern in ("docs/*.md", "tests/test_*.py", "tests/fixtures/*.pdf", "examples/retention/*.md"):
         names.extend(p.relative_to(ROOT).as_posix() for p in sorted(ROOT.glob(pattern)))
     files = {n: (ROOT / n).read_bytes() for n in names}
     fingerprint = build_id(files)

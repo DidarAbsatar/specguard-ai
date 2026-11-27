@@ -6,7 +6,7 @@ import subprocess
 
 
 ENGINE = ("specguard.py", "quality.py", "assessment.py", "reporting.py", "comparison.py", "provenance.py",
-          "chatgpt_provider.py", "review_tables.py")
+          "chatgpt_provider.py", "review_tables.py", "contract_rules.py", "pdf_layout.py")
 
 
 def build_id(files=None):

@@ -23,6 +23,34 @@ DEFERRED = re.compile(r"(?:заполняется|заполняются|буд�
                       r"(?:позже|позднее|отдельно|аналитик(?:ом|ами)|тестировщик(?:ом|ами)|"
                       r"разработчик(?:ом|ами)|владельц(?:ем|ами))[.]?", re.I)
 PENDING = "Смысл и полнота требуют ревью."
+# Explicit descriptions of the document itself. Never infer scope just from a section title.
+SCOPE = re.compile(
+    r"^(?:(?:здесь|(?:в|в настоящем|в этом|в данном|в этой|в настоящей|в данной)\s+"
+    r"(?:разделе|документе|спецификации))\s+"
+    r"(?:описан[аоы]?|описыва[ею]тся|рассматрива[ею]тся|перечислен[аоы]?|приведены сведения)\b|"
+    r"(?:(?:данный|этот|настоящий)\s+)?(?:раздел|документ|спецификация)\s+"
+    r"(?:описывает|охватывает|посвящ[её]н[ао]?|рассматривает|содержит описание)\b|"
+    r"(?:область применения|границы документа|назначение документа|цель документа)\s*[:—])", re.I)
+OUTSIDE_SCOPE = re.compile(r"\s+(?:находится|находятся|оста[её]тся|остаются|лежит|лежат)\s+за\s+"
+                           r"(?:рамками|пределами)\s+(?:(?:этого|данного|настоящего)\s+)?"
+                           r"(?:документа|раздела|спецификации)[.!;]?$", re.I)
+EMBEDDED_RULE = re.compile(
+    r"\b(?:что|как|если|когда|при условии|в случае|котор\w+|вправе|нельзя|может|"
+    r"в течение|не позднее|не раньше|не (?:более|менее)|"
+    r"\w{3,}(?:[аеияу][ею]т|ит|ается|яется|ётся|ится|[ая]тся))\b|,\s*(?:а|но)\s|[:\d]", re.I)
+
+
+def is_scope_clause(text):
+    text = text.replace("**", "").strip()
+    if NORM.search(text):
+        return False
+    intro = SCOPE.match(text)
+    if intro:
+        return not EMBEDDED_RULE.search(text[intro.end():])
+    exclusion = OUTSIDE_SCOPE.search(text)
+    return bool(exclusion and not EMBEDDED_RULE.search(text[:exclusion.start()]))
+
+
 MONTHS = ("январ", "феврал", "март", "апрел", "ма[йяе]", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр")
 
 
@@ -111,7 +139,7 @@ def section_paths(blocks):
     return result
 
 
-def inventory(blocks, paths=None, model_refs=(), excluded=()):
+def inventory(blocks, paths=None, model_refs=(), excluded=(), *, context=None):
     paths = section_paths(blocks) if paths is None else paths
     table, reqs = False, []
     for ref, text in blocks.items():
@@ -130,28 +158,31 @@ def inventory(blocks, paths=None, model_refs=(), excluded=()):
         if ref in excluded:
             continue
         normative = re.search("требования|правила|логика работы|параметры запроса|query-параметры|ответ|статусы|приемки", section, re.I)
-        if not (ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or DEFERRED.fullmatch(text)
-                or BOUND.match(text) or ref in model_refs):
-            continue
         if text.startswith(("```", "{")) or text.lower() in ("или", "да / нет"):
             continue
         clean = text[ident.end():] if ident else re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", text)
         sentences = [clean] if text.startswith("|") else re.split(r"(?<=[.!?;])\s+(?=[А-ЯЁA-Zа-яёa-z])", clean)
+        scope = [s for s in sentences if is_scope_clause(s)]
+        if context is not None:
+            context.extend(dict(ref=ref, text=s) for s in scope)
+        if not (scope or ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or DEFERRED.fullmatch(text)
+                or BOUND.match(text) or ref in model_refs):
+            continue
         for sentence in sentences:
-            if not sentence.strip() or re.fullmatch(r"\d+[.)]", sentence):
+            if sentence in scope or not sentence.strip() or re.fullmatch(r"\d+[.)]", sentence):
                 continue
             reqs.append(dict(source_id=ident[1] if ident else "—", refs=[ref], summary=sentence,
                              section=section, action=PENDING))
     return reqs
 
 
-def reconcile(blocks, paths, rows, excluded=()):
+def reconcile(blocks, paths, rows, excluded=(), *, context=None):
     """Keep each source clause until model excerpts account for its text."""
     by_ref = defaultdict(list)
     for row in rows:
         if row["kind"] == "requirement" and len(row["refs"]) == 1:
             by_ref[row["refs"][0]].append(row)
-    reqs = inventory(blocks, paths, by_ref, excluded)
+    reqs = inventory(blocks, paths, by_ref, excluded, context=context)
     for req in reqs:
         ref, = req["refs"]
         clause = req["summary"]
@@ -182,7 +213,8 @@ def analyze(blocks, rows, complete, *, header_refs=()):
     controls, document_gaps, headers = document_roles(blocks, paths, header_refs)
     supporting = controls.keys() | document_gaps.keys() | headers
     product_paths = {ref: path for ref, path in paths.items() if ref not in supporting}
-    reqs = reconcile(blocks, paths, rows, supporting)
+    context = []
+    reqs = reconcile(blocks, paths, rows, supporting, context=context)
     findings = []
 
     def add(category, severity, refs, reason, impact, fix, scenario=None, confirmed=False):
@@ -284,7 +316,21 @@ def analyze(blocks, rows, complete, *, header_refs=()):
         if VAGUE.search(r["summary"]):
             add("verifiability", "MEDIUM", r["refs"], "Качественная характеристика требует критерия проверки.",
                 "Приёмщики могут по-разному оценить результат.", "Указать метрику или ссылку на критерий.")
-    model_rows = [r for r in rows if r["kind"] in {"issue", "question"}]
+    questions = []
+    seen_questions = set()
+    for row in rows:
+        if row["kind"] != "question":
+            continue
+        refs = list(dict.fromkeys(row["refs"]))
+        key = (frozenset(refs), row["summary"], row["action"])
+        if key in seen_questions:
+            continue
+        seen_questions.add(key)
+        questions.append(dict(id=f"Q-{len(questions)+1:03}", question=row["action"], reason=row["summary"],
+                              impact=row["impact"], core_refs=refs, context_refs=row.get("context_refs", []),
+                              source_refs=[dict(anchor=k, quote=blocks[k]) for k in refs],
+                              detectors=[row.get("provider", "gemini")]))
+    model_rows = [r for r in rows if r["kind"] == "issue"]
     candidate_count = len(findings) + len(model_rows)
     for r in model_rows:
         category = r.get("category", "semantic")
@@ -332,7 +378,7 @@ def analyze(blocks, rows, complete, *, header_refs=()):
             f["observed_text"] = " / ".join(s["quote"] for s in f["source_refs"])
             f["context_refs"] = list(dict.fromkeys(f.get("context_refs", []) + r.get("context_refs", [])))
             continue
-        severity = r.get("severity", "HIGH" if r["kind"] == "issue" else "MEDIUM")
+        severity = r.get("severity", "HIGH")
         f = add(category, severity, r["refs"], r["summary"], r["impact"], r["action"], r["scenario"])
         f.update(detectors=[detector], criterion=r.get("criterion"), context_refs=r.get("context_refs", []))
         if re.fullmatch(r"(?:критическ|высок|низк|средн|значительн)\w*[.!]?", r["impact"].strip(), re.I):
@@ -341,6 +387,7 @@ def analyze(blocks, rows, complete, *, header_refs=()):
     for n, r in enumerate(reqs, 1):
         r["id"] = f"R-{n:03}"
         r["findings"] = [f["id"] for f in findings if set(f["core_refs"]).intersection(r["refs"])]
+        r["questions"] = [q["id"] for q in questions if set(q["core_refs"]).intersection(r["refs"])]
         if r["findings"]:
             r["action"] = "Разобрать связанные замечания " + ", ".join(r["findings"]) + "."
         elif r["coverage"] == "pending":
@@ -352,20 +399,26 @@ def analyze(blocks, rows, complete, *, header_refs=()):
     blockers = [f for f in findings if f["severity"] == "BLOCKER"]
     mapped = {ref for r in reqs for ref in r["refs"]}
     # Unclassified prose may contain an implicit obligation. Leave it visible to reviewers.
-    unclassified = [ref for ref in paths if ref not in mapped and ref not in supporting]
+    classified = mapped | supporting | {entry["ref"] for entry in context}
+    unclassified = [ref for ref in paths if ref not in classified]
     open_controls = [ref for ref, item in controls.items() if item["state"] not in {"DECLARED", "NOT_APPLICABLE"}]
     evidence_needed = open_controls + list(document_gaps)
     pending = [r for r in reqs if r["coverage"] == "pending"]
     open_assessments = [r["id"] for r in reqs if any(a["assessment"] != "grounded" for a in r["model_assessments"])]
-    gate = "BLOCKED" if blockers else "REVIEW" if findings or not complete or not reqs or unclassified or pending or open_assessments or evidence_needed else "READY"
+    gate = "BLOCKED" if blockers else "REVIEW" if findings or questions or not complete or not reqs or unclassified or pending or open_assessments or evidence_needed else "READY"
     links = [{"from":r["id"], "to":k, "relation":"source"} for r in reqs for k in r["refs"]]
     links.extend({"from":r["id"], "to":f, "relation":"finding"} for r in reqs for f in r["findings"])
+    links.extend({"from":r["id"], "to":q, "relation":"question"} for r in reqs for q in r["questions"])
     from assessment import assess, acceptance_links, disposition
     links.extend(acceptance_links(reqs, blocks, paths))
     criteria = assess(reqs, findings, unclassified + evidence_needed + [r["refs"][0] for r in pending])
     outstanding = unclassified + evidence_needed + [r["refs"][0] for r in reqs if r["coverage"] == "pending" or r["id"] in open_assessments]
-    return dict(requirements=reqs, findings=findings, gate=gate, links=links, calendar_checks=calendar,
-                decision=disposition(gate, findings, outstanding),
+    decision = disposition(gate, findings, outstanding)
+    if questions and not findings:
+        decision["next_step"] = questions[0]["question"]
+        decision["pending_refs"] = list(dict.fromkeys(questions[0]["core_refs"] + outstanding))
+    return dict(requirements=reqs, findings=findings, questions=questions, document_context=context,
+                gate=gate, links=links, calendar_checks=calendar, decision=decision,
                 candidate_count=candidate_count, pending_requirements=[r["id"] for r in pending],
                 open_assessments=open_assessments,
                 set_criteria=criteria, criteria_profile="29148:2018 / SpecGuard 1",

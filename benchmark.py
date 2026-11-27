@@ -54,7 +54,7 @@ def run(cloud=False, hybrid=False, suite="core"):
                 continue
             if not hybrid:
                 actual = [(r["category"], tuple(sorted({int(k[3:]) for k in r["refs"]})))
-                          for r in rows if r["kind"] != "requirement"]
+                          for r in rows if r["kind"] == "issue"]
         else:
             rows = []
         if not cloud or hybrid:
