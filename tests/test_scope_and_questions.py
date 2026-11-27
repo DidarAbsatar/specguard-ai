@@ -4,7 +4,7 @@ from unittest.mock import patch
 from benchmark import run as benchmark
 from quality import analyze
 from reporting import format_report
-from specguard import semantic
+from specguard import semantic, verify_candidates
 
 
 class ScopeAndQuestionTests(unittest.TestCase):
@@ -29,6 +29,33 @@ class ScopeAndQuestionTests(unittest.TestCase):
         run = analyze(blocks, [], False)
         self.assertEqual([r["refs"] for r in run["requirements"]], [["a"], ["b"]])
         self.assertEqual(run["document_context"], [{"ref":"c", "text":blocks["c"]}])
+
+    def test_intro_roles_are_scored_per_sentence(self):
+        actor = "Гость пришёл за пропуском."
+        premise = "У гостя уже есть приглашение."
+        behavior = "Терминал печатает пропуск."
+        blocks = {"a": f"{actor} Здесь описана выдача пропусков.", "b": f"{premise} {behavior}"}
+        context = [dict(ref=k, summary=s) for k, s in (("a", actor), ("b", premise), ("b", behavior))]
+        with patch("specguard.structured_json", return_value=dict(requirements=[], findings=[], context=context)):
+            rows = semantic(blocks)
+        self.assertEqual(verify_candidates(rows, blocks), rows)
+        run = analyze(blocks, rows, True)
+        self.assertEqual([r["summary"] for r in run["requirements"]], [behavior])
+        self.assertEqual([c["text"] for c in run["document_context"]], [actor, "Здесь описана выдача пропусков.", premise])
+        unknown = analyze(blocks, [], False)
+        self.assertIn(dict(ref="a", text=actor), unknown["unclassified_clauses"])
+        self.assertIn("a", unknown["unclassified_refs"])
+
+    def test_background_claim_cannot_remove_a_product_rule(self):
+        lines = ["SR-1. Доступ открыт с полудня.", "Приложение выдаёт пропуск.",
+                 "Вход разрешён только до полуночи."]
+        for sentence in lines:
+            src = {"a": sentence}
+            with self.subTest(text=sentence):
+                row = dict(kind="context", refs=["a"], summary=sentence.removeprefix("SR-1. "))
+                run = analyze(src, [row], True)
+                self.assertEqual(len(run["requirements"]), 1)
+                self.assertFalse(run["document_context"])
 
     def test_scope_alone_does_not_make_a_document_ready(self):
         blocks = {"a":"Здесь рассматривается выпуск пропусков."}

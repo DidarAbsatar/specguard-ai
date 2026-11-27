@@ -38,6 +38,14 @@ EMBEDDED_RULE = re.compile(
     r"\b(?:что|как|если|когда|при условии|в случае|котор\w+|вправе|нельзя|может|"
     r"в течение|не позднее|не раньше|не (?:более|менее)|"
     r"\w{3,}(?:[аеияу][ею]т|ит|ается|яется|ётся|ится|[ая]тся))\b|,\s*(?:а|но)\s|[:\d]", re.I)
+PRODUCT_CLAUSE = re.compile(r"\b(?:сервис|система|приложение|сервер|терминал|кабинет|интерфейс|модуль|"
+                            r"клиентское приложение|шлюз|платформа)\s+\w|"
+                            r"^(?:если|когда|при\s|по команде|после\s|до\s)|"
+                            r"^\w*(?:[аяиеыу]ть|ести|йти)\s|\b(?:минимум|максимум|не более|не менее|только|"
+                            r"сохраняется|определяется|отображается|возвращается|"
+                            r"запрещено|запрещается|TBD|TBS)\b", re.I)
+PREMISE = re.compile(r"^(?:исходные условия|предусловия)\s*[:—]|"
+                     r"^(?:в (?:сценариях ниже|следующих сценариях)|для всех сценариев)\s+", re.I)
 
 
 def is_scope_clause(text):
@@ -139,7 +147,7 @@ def section_paths(blocks):
     return result
 
 
-def inventory(blocks, paths=None, model_refs=(), excluded=(), *, context=None):
+def inventory(blocks, paths=None, model_refs=(), excluded=(), *, context=None, background=(), unresolved=None):
     paths = section_paths(blocks) if paths is None else paths
     table, reqs = False, []
     for ref, text in blocks.items():
@@ -162,27 +170,41 @@ def inventory(blocks, paths=None, model_refs=(), excluded=(), *, context=None):
             continue
         clean = text[ident.end():] if ident else re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", text)
         sentences = [clean] if text.startswith("|") else re.split(r"(?<=[.!?;])\s+(?=[А-ЯЁA-Zа-яёa-z])", clean)
-        scope = [s for s in sentences if is_scope_clause(s)]
+        # A model can identify introductory prose, but cannot suppress an ID, contract field,
+        # obligation, or a requirement from a normative section by calling it background.
+        row_claims = model_refs.get(ref, []) if isinstance(model_refs, dict) else []
+        claims = [r["summary"].strip(" .;") for r in row_claims if r["summary"].strip(" .;")]
+        described = [s for s in sentences if (ref, s) in background]
+        scope = [s for s in sentences if is_scope_clause(s) or
+                 ((s in described or PREMISE.match(s)) and not (ident or normative or text.startswith("|") or NORM.search(s)
+                                          or PRODUCT_CLAUSE.search(s) or any(q in s for q in claims)))]
         if context is not None:
             context.extend(dict(ref=ref, text=s) for s in scope)
-        if not (scope or ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or DEFERRED.fullmatch(text)
+        if not (scope or described or ident or normative or CONTRACT_FIELD.match(text) or NORM.search(text) or DEFERRED.fullmatch(text)
                 or BOUND.match(text) or ref in model_refs):
             continue
         for sentence in sentences:
             if sentence in scope or not sentence.strip() or re.fullmatch(r"\d+[.)]", sentence):
                 continue
+            if scope and not (ident or normative or NORM.search(sentence) or PRODUCT_CLAUSE.search(sentence)):
+                # Evidence for a sibling on the same source line cannot establish this sentence.
+                if not any(q in sentence for q in claims):
+                    if unresolved is not None:
+                        unresolved.append(dict(ref=ref, text=sentence))
+                    continue
             reqs.append(dict(source_id=ident[1] if ident else "—", refs=[ref], summary=sentence,
                              section=section, action=PENDING))
     return reqs
 
 
-def reconcile(blocks, paths, rows, excluded=(), *, context=None):
+def reconcile(blocks, paths, rows, excluded=(), *, context=None, unresolved=None):
     """Keep each source clause until model excerpts account for its text."""
     by_ref = defaultdict(list)
     for row in rows:
         if row["kind"] == "requirement" and len(row["refs"]) == 1:
             by_ref[row["refs"][0]].append(row)
-    reqs = inventory(blocks, paths, by_ref, excluded, context=context)
+    background = {(row["refs"][0], row["summary"]) for row in rows if row["kind"] == "context"}
+    reqs = inventory(blocks, paths, by_ref, excluded, context=context, background=background, unresolved=unresolved)
     for req in reqs:
         ref, = req["refs"]
         clause = req["summary"]
@@ -213,8 +235,8 @@ def analyze(blocks, rows, complete, *, header_refs=()):
     controls, document_gaps, headers = document_roles(blocks, paths, header_refs)
     supporting = controls.keys() | document_gaps.keys() | headers
     product_paths = {ref: path for ref, path in paths.items() if ref not in supporting}
-    context = []
-    reqs = reconcile(blocks, paths, rows, supporting, context=context)
+    context, unresolved = [], []
+    reqs = reconcile(blocks, paths, rows, supporting, context=context, unresolved=unresolved)
     findings = []
 
     def add(category, severity, refs, reason, impact, fix, scenario=None, confirmed=False):
@@ -400,7 +422,8 @@ def analyze(blocks, rows, complete, *, header_refs=()):
     mapped = {ref for r in reqs for ref in r["refs"]}
     # Unclassified prose may contain an implicit obligation. Leave it visible to reviewers.
     classified = mapped | supporting | {entry["ref"] for entry in context}
-    unclassified = [ref for ref in paths if ref not in classified]
+    unresolved_refs = {entry["ref"] for entry in unresolved}
+    unclassified = [ref for ref in paths if ref not in classified or ref in unresolved_refs]
     open_controls = [ref for ref, item in controls.items() if item["state"] not in {"DECLARED", "NOT_APPLICABLE"}]
     evidence_needed = open_controls + list(document_gaps)
     pending = [r for r in reqs if r["coverage"] == "pending"]
@@ -418,6 +441,7 @@ def analyze(blocks, rows, complete, *, header_refs=()):
         decision["next_step"] = questions[0]["question"]
         decision["pending_refs"] = list(dict.fromkeys(questions[0]["core_refs"] + outstanding))
     return dict(requirements=reqs, findings=findings, questions=questions, document_context=context,
+                unclassified_clauses=unresolved,
                 gate=gate, links=links, calendar_checks=calendar, decision=decision,
                 candidate_count=candidate_count, pending_requirements=[r["id"] for r in pending],
                 open_assessments=open_assessments,

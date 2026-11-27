@@ -136,7 +136,7 @@ def format_report(run, suffix):
         lines += ["", "Индивидуальные свойства без доказательства имеют статус UNKNOWN. "
                   "MODEL_ASSESSED означает оценку модели по цитате. В JSON у каждого требования доступны все девять свойств, статус и основания.", ""]
     if run.get("document_context"):
-        lines += ["", "## Область документа", ""]
+        lines += ["", "## Область документа и контекст", ""]
         lines.extend(f"- {display(c['ref'])} · {display(c['text'])}" for c in run["document_context"])
     if run.get("review_controls"):
         lines += ["## Карта проверок готовности документа", "",
@@ -159,6 +159,8 @@ def format_report(run, suffix):
         lines += ["", "## Строки вне карты требований", "",
                   f"Проверьте {len(pending)} строк: среди них могут быть контекст, заголовки таблиц и пропущенные обязательства.", ""]
         lines.extend(f"- {ref} · {display(run['sources'][ref])}" for ref in pending)
+        for clause in run.get("unclassified_clauses", []):
+            lines.append(f"- Фрагмент для сверки · {display(clause['ref'])} · {display(clause['text'])}")
     return render_markdown("\n".join(lines), suffix, "Результат ревью")
 
 
